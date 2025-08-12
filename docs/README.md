@@ -61,29 +61,90 @@ This repo emits six record classes to support “replayable scheduling/evaluatio
 CCTF outputs under logs/<RUN_ID>/cctf/ are ready for simulators.
 
 ## Extend to endpoint‑edge‑cloud (same image, three nodes)
-- Deploy the same image on three VMs; set stage/node and logs separately:
-  docker run -d -p 8080:8080 \
-    -e NODE_ID=cloud0 -e STAGE=cloud -e LOG_PATH=/logs \
-    -v $PWD/logs/cloud:/logs tunable-svc:0.1.0
 
-  docker run -d -p 8080:8080 \
-    -e NODE_ID=edge0 -e STAGE=edge -e LOG_PATH=/logs \
-    -v $PWD/logs/edge:/logs tunable-svc:0.1.0
+### Prerequisites
+- Three VMs with time sync (chrony/ntp) and mutual TCP/8080 reachability via host bridge
+- Same codebase on all VMs (git clone or copy)
+- Docker installed on all VMs
 
-  docker run -d -p 8080:8080 \
-    -e NODE_ID=ep0 -e STAGE=endpoint -e LOG_PATH=/logs \
-    -v $PWD/logs/endpoint:/logs tunable-svc:0.1.0
+### Step 1: Start applications (one container per VM)
 
-- Optional multi-hop with real endpoints (per layer):
-  - On endpoint VM:   DEFAULT_NEXT_URL=http://<edge_ip>:8080/blob/gzip
-  - On edge VM:       DEFAULT_NEXT_URL=http://<cloud_ip>:8080/kv/set/k1
-  - On cloud VM:      (unset)
-- Or set X-Next-Url per request to control the chain dynamically.
+Cloud VM (terminal endpoint, no forwarding):
+```bash
+docker run -d --name cloud -p 8080:8080 \
+  -e NODE_ID=cloud0 -e STAGE=cloud -e LOG_PATH=/logs \
+  -v $PWD/logs/cloud:/logs tunable-svc:0.1.0
+```
 
-Recommended practices for multi-VM:
-- Time sync (chrony/ntp) on all VMs (enables better ordering/merge)
-- Ensure TCP/8080 reachable between VMs (via host bridge as you planned)
-- Use a shared RUN_ID across VMs when collecting/parsing for the same experiment
+Edge VM (with optional forwarding to cloud):
+```bash
+docker run -d --name edge -p 8080:8080 \
+  -e NODE_ID=edge0 -e STAGE=edge -e LOG_PATH=/logs \
+  -e DEFAULT_NEXT_URL=http://<cloud_ip>:8080/kv/set/k1 \
+  -v $PWD/logs/edge:/logs tunable-svc:0.1.0
+```
+
+Endpoint VM (with optional forwarding to edge):
+```bash
+docker run -d --name endpoint -p 8080:8080 \
+  -e NODE_ID=ep0 -e STAGE=endpoint -e LOG_PATH=/logs \
+  -e DEFAULT_NEXT_URL=http://<edge_ip>:8080/blob/gzip \
+  -v $PWD/logs/endpoint:/logs tunable-svc:0.1.0
+```
+
+Health check (any VM): `curl http://127.0.0.1:8080/work`
+
+### Step 2: Start trace collection (each VM separately)
+
+Set unified RUN_ID across all VMs:
+```bash
+export RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)  # e.g., 20250812T160000Z
+```
+
+Start system-level collection on each VM:
+```bash
+make start-collect RUN_ID=$RUN_ID VM_IP=<this_vm_ip>
+```
+
+Note: App-level events (app_events) are automatically collected by tracekit middleware.
+
+### Step 3: Trigger real workload chain
+
+Example real chain: JSON validation (endpoint) → GZIP compression (edge) → KV storage (cloud)
+
+From endpoint VM, send JSON request (will auto-forward if DEFAULT_NEXT_URL set):
+```bash
+echo '{"a":1}' > /tmp/body.json
+curl -X POST -H 'Content-Type: application/json' \
+  --data-binary @/tmp/body.json http://<endpoint_ip>:8080/json/validate
+```
+
+Alternative (per-request control without DEFAULT_NEXT_URL):
+```bash
+curl -H 'X-Next-Url: http://<edge_ip>:8080/blob/gzip' \
+  -X POST -H 'Content-Type: application/json' \
+  --data-binary @/tmp/body.json http://<endpoint_ip>:8080/json/validate
+```
+
+### Step 4: Stop collection and parse (each VM separately)
+
+```bash
+make stop-collect RUN_ID=$RUN_ID
+make parse RUN_ID=$RUN_ID
+```
+
+Each VM produces:
+- logs/$RUN_ID/events.jsonl (app_events with trace_id/span_id/parent_id across VMs)
+- logs/$RUN_ID/cctf/ (standardized for simulators)
+
+### Step 5: Merge multi-VM CCTF (optional, future)
+
+Collect all three logs/$RUN_ID/cctf/ directories to one machine and merge:
+- nodes.json, links.json: array merge + dedup
+- *.jsonl files: concatenate + time-sort
+- Result: unified_cctf/ ready for simulator replay
+
+(Merge script tools/merge_cctf.py to be added later)
 
 ## Back up before deleting this VM
 Minimum:
