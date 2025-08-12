@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+.python-version
+
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store
+
+# Build/packaging
+build/
+dist/
+*.tar
+*.tar.gz
+*.zip
+
+# Tests/coverage
+.pytest_cache/
+.coverage
+coverage.xml
+
+# Env/config
+.env
+
+# Project-specific
+logs/
+*.db
+*.bin
+*.gz
+results.bin
+
