@@ -1,4 +1,6 @@
 # ===== 用户可改参数（可被 scenarios/*.env 覆盖） =====
+-include run_id.env
+
 RUN_ID ?= $(shell date -u +%Y%m%dT%H%M%SZ)
 .EXPORT_ALL_VARIABLES:
 
@@ -10,7 +12,7 @@ CALL_URL ?=
 NODE_ID ?= vm0
 STAGE ?= edge
 WORKERS ?= 1
-IFACE ?= 
+IFACE ?=
 IMG ?= tunable-svc:0.1.0
 VM_IP ?= 127.0.0.1
 
