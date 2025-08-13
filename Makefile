@@ -46,9 +46,8 @@ run:
 	  -e WORKERS=$(WORKERS) \
 	  -e DEFAULT_NEXT_URL=$(DEFAULT_NEXT_URL) \
 	  -v $(PWD)/$(LOG_DIR):/logs $(IMG)
-	# 简单健康检查
-	@for i in $$(seq 1 60); do curl -sf "http://$(VM_IP):8080/work" >/dev/null && break || sleep 0.5; done
-	@echo "service on http://$(VM_IP):8080/work (run_id=$(RUN_ID))"
+	# 健康检查已禁用（按需求移除自动 /work 探活）
+	@echo "container started (healthcheck=disabled) (run_id=$(RUN_ID))"
 	@echo $(RUN_ID) > $(LOG_DIR)/.run_id
 start-collect:
 	@RUN_ID=$(RUN_ID) NODE_ID=$(NODE_ID) STAGE=$(STAGE) IFACE=$(IFACE) VM_IP=$(VM_IP) bash tools/collect_sys.sh start

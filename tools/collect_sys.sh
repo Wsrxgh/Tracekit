@@ -18,20 +18,32 @@ IFACE=${IFACE:-}   # 允许用户强制指定（为空则自动选择）
 
 # 轻量依赖提示（不阻断）
 command -v mpstat >/dev/null || echo "WARN: mpstat not found (sysstat)"
-command -v ifstat >/dev/null || echo "WARN: ifstat not found"
+command -v ifstat >/devnull || echo "WARN: ifstat not found"
 command -v vmstat >/dev/null || echo "WARN: vmstat not found (procps)"
 command -v jq     >/dev/null || echo "WARN: jq not found (node_meta/link_meta json)"
 
-# 自动选择采集网卡：回环→lo；否则根据到 VM_IP 的路由推断
-if [ -z "$IFACE" ]; then
-  if [ "$VM_IP" = "127.0.0.1" ] || [ "$VM_IP" = "localhost" ]; then
-    IFACE="lo"
-  else
-    IFACE=$(ip route get "$VM_IP" 2>/dev/null | awk '/dev/ {for(i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -n1 || true)
-    [ -z "${IFACE:-}" ] && IFACE="eth0"
+# 若未显式传入 NODE_ID/STAGE，尝试从正在运行的容器 env 获取（与应用保持一致）
+if [ -z "${NODE_ID:-}" ] || [ -z "${STAGE:-}" ]; then
+  if command -v docker >/dev/null 2>&1; then
+    ENV_LINES=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' svc 2>/dev/null || true)
+    if [ -z "${NODE_ID:-}" ]; then NODE_ID=$(echo "$ENV_LINES" | awk -F= '/^NODE_ID=/ {print $2}' | tail -n1); fi
+    if [ -z "${STAGE:-}" ]; then STAGE=$(echo "$ENV_LINES" | awk -F= '/^STAGE=/ {print $2}' | tail -n1); fi
   fi
 fi
-echo "collect: target=$VM_IP iface=$IFACE (run_id=$RUN_ID)"
+NODE_ID=${NODE_ID:-vm0}
+STAGE=${STAGE:-edge}
+
+# 自动选择采集网卡：优先根据到 VM_IP 的路由；若 VM_IP 为空或回环，则取默认路由网卡；最后回退 lo/eth0
+if [ -z "$IFACE" ]; then
+  if [ -n "${VM_IP:-}" ] && [ "$VM_IP" != "127.0.0.1" ] && [ "$VM_IP" != "localhost" ]; then
+    IFACE=$(ip route get "$VM_IP" 2>/dev/null | awk '/dev/ {for(i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -n1 || true)
+  fi
+  if [ -z "${IFACE:-}" ]; then
+    IFACE=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
+  fi
+  [ -z "${IFACE:-}" ] && IFACE="lo"
+fi
+echo "collect: target=${VM_IP:-N/A} iface=$IFACE node=$NODE_ID stage=$STAGE (run_id=$RUN_ID)"
 
 # --- 写节点元信息 ---
 node_meta() {
@@ -43,14 +55,14 @@ node_meta() {
   if command -v jq >/dev/null; then
     jq -n --arg host "$HOST" --arg iface "$IFACE" \
           --arg run_id "$RUN_ID" \
-          --arg node "${NODE_ID:-vm0}" \
-          --arg stage "${STAGE:-edge}" \
+          --arg node "$NODE_ID" \
+          --arg stage "$STAGE" \
           --argjson cores ${CORES} --argjson mem_mb ${MEM_MB} \
           '{run_id:$run_id,node:$node,stage:$stage,host:$host,iface:$iface,cpu_cores:$cores,mem_mb:$mem_mb}' \
           > "$OUT"
   else
     cat > "$OUT" <<EOF
-{"run_id":"$RUN_ID","node":"${NODE_ID:-vm0}","stage":"${STAGE:-edge}","host":"$HOST","iface":"$IFACE","cpu_cores":$CORES,"mem_mb":$MEM_MB}
+{"run_id":"$RUN_ID","node":"$NODE_ID","stage":"$STAGE","host":"$HOST","iface":"$IFACE","cpu_cores":$CORES,"mem_mb":$MEM_MB}
 EOF
   fi
 }

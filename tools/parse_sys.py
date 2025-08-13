@@ -16,8 +16,16 @@ assert RUN_ID, "No RUN_ID and no logs/* found"
 LOGS = logs_root / RUN_ID
 print(f"[parse] RUN_ID={RUN_ID}")
 
+# Resolve identity for this parse run
 NODE_ID = os.environ.get("NODE_ID", "vm0")
 STAGE   = os.environ.get("STAGE", "edge")
+# Hard override from node_meta.json if available (authoritative)
+try:
+    _m = json.load(open(LOGS/"node_meta.json","r"))
+    NODE_ID = _m.get("node", NODE_ID)
+    STAGE = _m.get("stage", STAGE)
+except Exception:
+    pass
 
 # ---------- 1) 合并服务端事件 ----------
 event_files = sorted(glob.glob(str(LOGS / "events.*.jsonl")))
