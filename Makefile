@@ -1,5 +1,5 @@
 # ===== 用户可改参数（可被 scenarios/*.env 覆盖） =====
-RUN_ID := $(shell date -u +%Y%m%dT%H%M%SZ)
+RUN_ID ?= $(shell date -u +%Y%m%dT%H%M%SZ)
 .EXPORT_ALL_VARIABLES:
 
 RATE ?= 50

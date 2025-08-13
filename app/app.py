@@ -51,7 +51,8 @@ async def work(request: Request):
     cpu_ms = int(qp.get("cpu_ms", "0"))
     resp_kb = int(qp.get("resp_kb", "0"))
     call_url = qp.get("call_url", "")
-    trace_id = qp.get("trace_id") or request.headers.get("X-Trace-Id") or str(uuid.uuid4())
+    base_trace = getattr(request.state, "trace_id", None) or request.headers.get("X-Trace-Id") or str(uuid.uuid4())
+    trace_id = qp.get("trace_id") or base_trace
 
     body_bytes = await request.body()
 
@@ -81,7 +82,7 @@ async def work(request: Request):
 # ===== 真实工作负载端点 =====
 @app.post("/json/validate")
 async def json_validate(request: Request):
-    trace_id = request.headers.get("X-Trace-Id") or str(uuid.uuid4())
+    trace_id = getattr(request.state, "trace_id", None) or request.headers.get("X-Trace-Id") or str(uuid.uuid4())
     try:
         data = await request.json()
         assert isinstance(data, dict)
@@ -100,7 +101,7 @@ async def json_validate(request: Request):
 
 @app.post("/blob/gzip")
 async def blob_gzip(request: Request):
-    trace_id = request.headers.get("X-Trace-Id") or str(uuid.uuid4())
+    trace_id = getattr(request.state, "trace_id", None) or request.headers.get("X-Trace-Id") or str(uuid.uuid4())
     raw = await request.body()
     gz = gzip.compress(raw, compresslevel=6)
     # optional forward compressed bytes
@@ -112,7 +113,7 @@ async def blob_gzip(request: Request):
 
 @app.post("/blob/gunzip")
 async def blob_gunzip(request: Request):
-    trace_id = request.headers.get("X-Trace-Id") or str(uuid.uuid4())
+    trace_id = getattr(request.state, "trace_id", None) or request.headers.get("X-Trace-Id") or str(uuid.uuid4())
     gz = await request.body()
     try:
         raw = gzip.decompress(gz)
@@ -128,7 +129,7 @@ async def blob_gunzip(request: Request):
 
 @app.post("/hash/sha256")
 async def hash_sha256(request: Request):
-    trace_id = request.headers.get("X-Trace-Id") or str(uuid.uuid4())
+    trace_id = getattr(request.state, "trace_id", None) or request.headers.get("X-Trace-Id") or str(uuid.uuid4())
     data = await request.body()
     h = hashlib.sha256(data).hexdigest().encode()
     # typically terminal; but allow optional forward of the hash string
@@ -140,7 +141,7 @@ async def hash_sha256(request: Request):
 
 @app.post("/kv/set/{key}")
 async def kv_set(key: str, request: Request):
-    trace_id = request.headers.get("X-Trace-Id") or str(uuid.uuid4())
+    trace_id = getattr(request.state, "trace_id", None) or request.headers.get("X-Trace-Id") or str(uuid.uuid4())
     val = await request.body()
     SQL_CONN.execute("INSERT OR REPLACE INTO kv(k, v) VALUES(?, ?)", (key, val))
     SQL_CONN.commit()
@@ -153,7 +154,7 @@ async def kv_set(key: str, request: Request):
 
 @app.get("/kv/get/{key}")
 async def kv_get(key: str, request: Request):
-    trace_id = request.headers.get("X-Trace-Id") or str(uuid.uuid4())
+    trace_id = getattr(request.state, "trace_id", None) or request.headers.get("X-Trace-Id") or str(uuid.uuid4())
     cur = SQL_CONN.execute("SELECT v FROM kv WHERE k=?", (key,))
     row = cur.fetchone()
     val = row[0] if row else b""

@@ -53,6 +53,10 @@ _span_ctx: ContextVar[Optional[dict]] = ContextVar("span_ctx", default=None)
 def get_current_span() -> Optional[dict]:
     return _span_ctx.get()
 
+def current_trace_id() -> Optional[str]:
+    ctx = _span_ctx.get()
+    return ctx.get("trace_id") if ctx else None
+
 def child_headers(trace_id_override: Optional[str] = None) -> dict:
     ctx = _span_ctx.get() or {}
     trace_id = trace_id_override or ctx.get("trace_id") or str(uuid.uuid4())
@@ -103,12 +107,18 @@ def setup_tracing(app: FastAPI):
         with IN_FLIGHT_LOCK:
             IN_FLIGHT += 1
 
-        # set context
+        # set context (contextvar + request.state for app-side propagation)
         _span_ctx.set({
             "trace_id": trace_id,
             "span_id": span_id,
             "parent_id": parent_id,
         })
+        try:
+            req.state.trace_id = trace_id
+            req.state.span_id = span_id
+            req.state.parent_id = parent_id
+        except Exception:
+            pass
 
         # timings
         ts_start = now_ms()
@@ -182,7 +192,7 @@ def setup_tracing(app: FastAPI):
         })
 
 __all__ = [
-    "setup_tracing", "child_headers", "get_current_span", "LOG_DIR",
+    "setup_tracing", "child_headers", "get_current_span", "current_trace_id", "LOG_DIR",
     "NODE_ID", "STAGE", "APP_ID", "MODULE_ID"
 ]
 

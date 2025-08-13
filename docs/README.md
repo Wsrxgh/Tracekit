@@ -16,6 +16,8 @@ Prereqs: Docker installed
    - make real-all     # run json→gzip→hash→kvset→kvget sequentially
    - Alternatives: make real-json | real-gzip | real-hash | real-kvset | real-kvget
 
+Note: RUN_ID now respects environment override (Makefile uses `RUN_ID ?=`). You may `echo "RUN_ID=..." > run_id.env` then `source run_id.env` before make targets.
+
 Defaults (override as needed):
 - REAL_RATE=40 (req/s), REAL_DUR=20s, REAL_SIZE=8192 bytes
 - Override e.g.: make real-json REAL_RATE=60 REAL_DUR=30s REAL_SIZE=16384
@@ -69,36 +71,32 @@ CCTF outputs under logs/<RUN_ID>/cctf/ are ready for simulators.
 
 ### Step 1: Start applications (one container per VM)
 
-Cloud VM (terminal endpoint, no forwarding):
+You can use scenarios to load per-role envs: `SCEN=cloud|edge|endpoint make run`.
+
+Cloud VM:
 ```bash
-docker run -d --name cloud -p 8080:8080 \
-  -e NODE_ID=cloud0 -e STAGE=cloud -e LOG_PATH=/logs \
-  -v $PWD/logs/cloud:/logs tunable-svc:0.1.0
+SCEN=cloud VM_IP=<cloud_ip> make run
 ```
 
-Edge VM (with optional forwarding to cloud):
+Edge VM:
 ```bash
-docker run -d --name edge -p 8080:8080 \
-  -e NODE_ID=edge0 -e STAGE=edge -e LOG_PATH=/logs \
-  -e DEFAULT_NEXT_URL=http://<cloud_ip>:8080/kv/set/k1 \
-  -v $PWD/logs/edge:/logs tunable-svc:0.1.0
+SCEN=edge VM_IP=<edge_ip> make run
 ```
 
-Endpoint VM (with optional forwarding to edge):
+Endpoint VM:
 ```bash
-docker run -d --name endpoint -p 8080:8080 \
-  -e NODE_ID=ep0 -e STAGE=endpoint -e LOG_PATH=/logs \
-  -e DEFAULT_NEXT_URL=http://<edge_ip>:8080/blob/gzip \
-  -v $PWD/logs/endpoint:/logs tunable-svc:0.1.0
+SCEN=endpoint VM_IP=<endpoint_ip> make run
 ```
 
 Health check (any VM): `curl http://127.0.0.1:8080/work`
 
 ### Step 2: Start trace collection (each VM separately)
 
-Set unified RUN_ID across all VMs:
+Set unified RUN_ID across all VMs (Makefile honors env):
 ```bash
-export RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)  # e.g., 20250812T160000Z
+echo "RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)" > run_id.env
+# copy to all VMs, then on each:
+source run_id.env
 ```
 
 Start system-level collection on each VM:
@@ -106,7 +104,9 @@ Start system-level collection on each VM:
 make start-collect RUN_ID=$RUN_ID VM_IP=<this_vm_ip>
 ```
 
-Note: App-level events (app_events) are automatically collected by tracekit middleware.
+Notes:
+- App-level events are automatically collected by tracekit middleware.
+- Request trace_id is now propagated via request.state injected by middleware, so cross-VM trace_id stays consistent while parent/child spans reflect hop relationships.
 
 ### Step 3: Trigger real workload chain
 
