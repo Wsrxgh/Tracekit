@@ -35,3 +35,4 @@ logs/
 *.gz
 results.bin
 
+run_id.env
