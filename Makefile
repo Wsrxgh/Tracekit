@@ -42,6 +42,7 @@ run:
 	  -e NODE_ID=$(NODE_ID) -e STAGE=$(STAGE) \
 	  -e LOG_PATH=/logs \
 	  -e WORKERS=$(WORKERS) \
+	  -e DEFAULT_NEXT_URL=$(DEFAULT_NEXT_URL) \
 	  -v $(PWD)/$(LOG_DIR):/logs $(IMG)
 	# 简单健康检查
 	@for i in $$(seq 1 60); do curl -sf "http://$(VM_IP):8080/work" >/dev/null && break || sleep 0.5; done
