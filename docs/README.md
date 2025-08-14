@@ -30,7 +30,7 @@ Artifacts (latest RUN_ID under logs/<RUN_ID>/):
 - cctf/: nodes.json, links.json, invocations.jsonl, host_metrics.jsonl, link_metrics.jsonl,
          placement_events.jsonl, system_stats.jsonl, run_meta.json, module_inventory.json
 
-Note: Health check uses /work, but real-* targets load only real endpoints.
+Note: No automatic health check. The /work endpoint exists only for manual checks; real-* targets hit real endpoints only.
 
 ## Real endpoints (business-like)
 - POST /json/validate       # JSON parse/validate (returns 200 or 400)
@@ -88,21 +88,30 @@ Endpoint VM:
 SCEN=endpoint VM_IP=<endpoint_ip> make run
 ```
 
-Health check (any VM): `curl http://127.0.0.1:8080/work`
+Optional manual check (any VM): `curl http://127.0.0.1:8080/work`
 
 ### Step 2: Start trace collection (each VM separately)
 
-Set unified RUN_ID across all VMs (Makefile honors env):
+Set unified RUN_ID across all VMs (Makefile reads run_id.env and honors env):
 ```bash
 echo "RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)" > run_id.env
 # copy to all VMs, then on each:
 source run_id.env
 ```
 
-Start system-level collection on each VM:
+Start system-level collection on each VM (put variables AFTER make for highest precedence):
 ```bash
-make start-collect RUN_ID=$RUN_ID VM_IP=<this_vm_ip>
+# Endpoint
+make start-collect RUN_ID=$RUN_ID NODE_ID=ep0   STAGE=endpoint VM_IP=<endpoint_ip> IFACE=<iface>
+# Edge
+make start-collect RUN_ID=$RUN_ID NODE_ID=edge0 STAGE=edge     VM_IP=<edge_ip>     IFACE=<iface>
+# Cloud
+make start-collect RUN_ID=$RUN_ID NODE_ID=cloud0 STAGE=cloud   VM_IP=<cloud_ip>    IFACE=<iface>
 ```
+Notes:
+- Always start containers first (make run), then start-collect.
+- IFACE should be the external NIC (e.g., ens2). If omitted, the script infers via `ip route get <VM_IP>`.
+- The collector script pre-stops any previous collectors for the same RUN_ID and uses robust stop (TERM→KILL) to avoid residue.
 
 Notes:
 - App-level events are automatically collected by tracekit middleware.
@@ -127,6 +136,90 @@ curl -H 'X-Next-Url: http://<edge_ip>:8080/blob/gzip' \
 ```
 
 ### Step 4: Stop collection and parse (each VM separately)
+
+
+### End-to-end checklist (copy-paste)
+
+Assumptions:
+- Use one unified RUN_ID via run_id.env on all VMs
+- Put variables AFTER make (highest precedence)
+- Replace <cloud_ip>/<edge_ip>/<endpoint_ip>/<iface> with your values (e.g., ens2)
+
+0) Unify RUN_ID (once)
+```bash
+# On one VM (e.g., endpoint)
+echo "RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)" > run_id.env
+# Copy to the other two, then on each VM:
+source run_id.env && echo $RUN_ID
+```
+
+1) Cloud (192.168.x.x)
+```bash
+cd /home/cloud0_gxie/Tracekit && source run_id.env
+# clean any old collectors (all RUN_IDs)
+for d in logs/*; do RUN_ID="$(basename "$d")" RUN_ID="$RUN_ID" bash tools/collect_sys.sh stop || true; done
+pkill -f 'mpstat 1' || true; pkill -f 'ifstat -i ' || true; pkill -f 'vmstat -Sm -t 1' || true
+# container
+make build && make stop
+SCEN=cloud VM_IP=<cloud_ip> make run
+# start collection (variables after make)
+make start-collect RUN_ID=$RUN_ID NODE_ID=cloud0 STAGE=cloud VM_IP=<cloud_ip> IFACE=<iface>
+# quick check
+jq . logs/$RUN_ID/node_meta.json | egrep '"node"|"stage"|"iface"'
+```
+
+2) Edge (192.168.x.x)
+```bash
+cd /home/edge0_gxie/Tracekit && source run_id.env
+for d in logs/*; do RUN_ID="$(basename "$d")" RUN_ID="$RUN_ID" bash tools/collect_sys.sh stop || true; done
+pkill -f 'mpstat 1' || true; pkill -f 'ifstat -i ' || true; pkill -f 'vmstat -Sm -t 1' || true
+make build && make stop
+SCEN=edge VM_IP=<edge_ip> make run
+make start-collect RUN_ID=$RUN_ID NODE_ID=edge0 STAGE=edge VM_IP=<edge_ip> IFACE=<iface>
+jq . logs/$RUN_ID/node_meta.json | egrep '"node"|"stage"|"iface"'
+```
+
+3) Endpoint (192.168.x.x)
+```bash
+cd /home/endpoint0_gxie/Tracekit && source run_id.env
+for d in logs/*; do RUN_ID="$(basename "$d")" RUN_ID="$RUN_ID" bash tools/collect_sys.sh stop || true; done
+pkill -f 'mpstat 1' || true; pkill -f 'ifstat -i ' || true; pkill -f 'vmstat -Sm -t 1' || true
+make build && make stop
+SCEN=endpoint VM_IP=<endpoint_ip> make run
+make start-collect RUN_ID=$RUN_ID NODE_ID=ep0 STAGE=endpoint VM_IP=<endpoint_ip> IFACE=<iface>
+jq . logs/$RUN_ID/node_meta.json | egrep '"node"|"stage"|"iface"'
+```
+
+4) Trigger chain (on endpoint)
+```bash
+echo '{"a":1}' > /tmp/body.json
+curl -X POST -H 'Content-Type: application/json' --data-binary @/tmp/body.json http://<endpoint_ip>:8080/json/validate
+```
+
+5) Stop collection and parse (each VM)
+```bash
+# Cloud
+cd /home/cloud0_gxie/Tracekit && make stop-collect RUN_ID=$RUN_ID && make parse RUN_ID=$RUN_ID
+# Edge
+cd /home/edge0_gxie/Tracekit && make stop-collect RUN_ID=$RUN_ID && make parse RUN_ID=$RUN_ID
+# Endpoint
+cd /home/endpoint0_gxie/Tracekit && make stop-collect RUN_ID=$RUN_ID && make parse RUN_ID=$RUN_ID
+```
+
+6) Quick checks
+```bash
+# stage/node/iface labels
+jq . logs/$RUN_ID/node_meta.json | egrep '"node"|"stage"|"iface"'
+# link labels per node
+head -n 3 logs/$RUN_ID/links.jsonl
+head -n 3 logs/$RUN_ID/cctf/link_metrics.jsonl
+# cross-VM trace_id (grab on endpoint, then search on edge/cloud)
+EP_TID=$(grep '"/json/validate"' /home/endpoint0_gxie/Tracekit/logs/$RUN_ID/events.*.jsonl | tail -n1 | jq -r .trace_id)
+grep "$EP_TID" /home/edge0_gxie/Tracekit/logs/$RUN_ID/events.*.jsonl | tail -n2
+grep "$EP_TID" /home/cloud0_gxie/Tracekit/logs/$RUN_ID/events.*.jsonl | tail -n2
+# ensure collectors stopped
+ps -ef | egrep 'mpstat 1|ifstat -i|vmstat -Sm -t 1' | grep -v grep || echo "all collectors stopped"
+```
 
 ```bash
 make stop-collect RUN_ID=$RUN_ID

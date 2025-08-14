@@ -18,7 +18,7 @@ IFACE=${IFACE:-}   # 允许用户强制指定（为空则自动选择）
 
 # 轻量依赖提示（不阻断）
 command -v mpstat >/dev/null || echo "WARN: mpstat not found (sysstat)"
-command -v ifstat >/devnull || echo "WARN: ifstat not found"
+command -v ifstat >/dev/null || echo "WARN: ifstat not found"
 command -v vmstat >/dev/null || echo "WARN: vmstat not found (procps)"
 command -v jq     >/dev/null || echo "WARN: jq not found (node_meta/link_meta json)"
 
@@ -103,7 +103,28 @@ link_meta() {
   fi
 }
 
+# ---- helpers: stop previous collectors in this LOG_DIR (TERM -> wait -> KILL) ----
+stop_collectors() {
+  local did=0
+  for name in mpstat ifstat vmstat; do
+    local pf="$LOG_DIR/${name}.pid"
+    if [ -f "$pf" ]; then
+      local PID=$(cat "$pf" 2>/dev/null || echo "")
+      if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        kill "$PID" 2>/dev/null || true
+        sleep 0.5
+        kill -0 "$PID" 2>/dev/null && kill -9 "$PID" 2>/dev/null || true
+        did=1
+      fi
+      rm -f "$pf" 2>/dev/null || true
+    fi
+  done
+  [ $did -eq 1 ] && echo "previous collectors stopped in $LOG_DIR" || true
+}
+
 if [ "$CMD" = "start" ]; then
+  # pre-stop in case of repeated starts on the same RUN_ID
+  stop_collectors
   node_meta
   link_meta
 
@@ -122,15 +143,7 @@ if [ "$CMD" = "start" ]; then
   echo "collectors started → $LOG_DIR"
 
 else
-  # 停止各采集器
-  for f in mpstat.pid ifstat.pid vmstat.pid; do
-    if [ -f "$LOG_DIR/$f" ]; then
-      PID=$(cat "$LOG_DIR/$f" 2>/dev/null || echo "")
-      if [ -n "${PID:-}" ]; then
-        kill "$PID" 2>/dev/null || true
-      fi
-      rm -f "$LOG_DIR/$f"
-    fi
-  done
+  # 停止各采集器（TERM -> wait -> KILL），并清理 pid 文件
+  stop_collectors
   echo "collectors stopped"
 fi
