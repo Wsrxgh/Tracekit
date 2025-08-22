@@ -16,6 +16,15 @@ CMD=${1:-start}
 VM_IP=${VM_IP:-127.0.0.1}
 IFACE=${IFACE:-}   # 允许用户强制指定（为空则自动选择）
 
+# Container name for in-container sampling (app-agnostic). Default 'svc'.
+CONTAINER=${CONTAINER:-svc}
+# Target process match patterns for per-PID sampling (case-insensitive, '|' separated).
+# Defaults cover common servers and batch tools; narrow it (e.g., '^ffmpeg$') to reduce noise, or extend as needed.
+PROC_MATCH=${PROC_MATCH:-python|uvicorn|gunicorn|ffmpeg|onnx|onnxruntime|java|node|nginx|torchserve}
+# Whether to refresh PID set every sampling tick (0=once at start, 1=refresh each tick). Refreshing is safer for
+# processes that respawn/change PID frequently (slightly more overhead due to extra matching per tick).
+PROC_REFRESH=${PROC_REFRESH:-0}
+
 # 轻量依赖提示（不阻断）
 command -v mpstat >/dev/null || echo "WARN: mpstat not found (sysstat)"
 command -v ifstat >/dev/null || echo "WARN: ifstat not found"
@@ -31,7 +40,7 @@ if [ -z "${NODE_ID:-}" ] || [ -z "${STAGE:-}" ]; then
   fi
 fi
 NODE_ID=${NODE_ID:-vm0}
-STAGE=${STAGE:-edge}
+STAGE=${STAGE:-cloud}
 
 # 自动选择采集网卡：优先根据到 VM_IP 的路由；若 VM_IP 为空或回环，则取默认路由网卡；最后回退 lo/eth0
 if [ -z "$IFACE" ]; then
@@ -52,17 +61,29 @@ node_meta() {
   local CORES=$(nproc 2>/dev/null || echo 1)
   local MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
 
+  # CPU model/freq (best-effort)
+  local CPU_MODEL="$(lscpu 2>/dev/null | awk -F: '/Model name/ {sub(/^ +/,"",$2); print $2}' | head -n1)"
+  if [ -z "$CPU_MODEL" ]; then
+    CPU_MODEL="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ //')"
+  fi
+  local CPU_MHZ="$(lscpu 2>/dev/null | awk -F: '/CPU max MHz/ {sub(/^ +/,"",$2); print int($2)}' | head -n1)"
+  if [ -z "$CPU_MHZ" ]; then
+    CPU_MHZ="$(awk -F: '/cpu MHz/ {gsub(/^ +/,"",$2); print int($2)}' /proc/cpuinfo 2>/dev/null | head -n1)"
+  fi
+  [ -z "$CPU_MHZ" ] && CPU_MHZ=0
+
   if command -v jq >/dev/null; then
     jq -n --arg host "$HOST" --arg iface "$IFACE" \
           --arg run_id "$RUN_ID" \
           --arg node "$NODE_ID" \
           --arg stage "$STAGE" \
+          --arg model "$CPU_MODEL" --argjson mhz ${CPU_MHZ} \
           --argjson cores ${CORES} --argjson mem_mb ${MEM_MB} \
-          '{run_id:$run_id,node:$node,stage:$stage,host:$host,iface:$iface,cpu_cores:$cores,mem_mb:$mem_mb}' \
+          '{run_id:$run_id,node:$node,stage:$stage,host:$host,iface:$iface,cpu_cores:$cores,mem_mb:$mem_mb,cpu_model:$model,cpu_freq_mhz:$mhz}' \
           > "$OUT"
   else
     cat > "$OUT" <<EOF
-{"run_id":"$RUN_ID","node":"$NODE_ID","stage":"$STAGE","host":"$HOST","iface":"$IFACE","cpu_cores":$CORES,"mem_mb":$MEM_MB}
+{"run_id":"$RUN_ID","node":"$NODE_ID","stage":"$STAGE","host":"$HOST","iface":"$IFACE","cpu_cores":$CORES,"mem_mb":$MEM_MB,"cpu_model":"$CPU_MODEL","cpu_freq_mhz":$CPU_MHZ}
 EOF
   fi
 }
@@ -82,11 +103,10 @@ link_meta() {
   # 传播时延近似：如果目标不是回环，用 ping 的平均 RTT/2
   local PR_S="null"
   if [ "$VM_IP" != "127.0.0.1" ] && [ "$VM_IP" != "localhost" ]; then
-    # 使用 -n 纯数字，-c3 三次，-i0.2 间隔，-w2 总超时
-    local RTT_MS=$(ping -n -c3 -i0.2 -w2 "$VM_IP" 2>/dev/null | awk -F'/' '/rtt/ {print $5}')
-    if [ -n "${RTT_MS:-}" ]; then
-      # 用 awk 计算 (RTT/2)/1000
-      PR_S=$(awk -v r="$RTT_MS" 'BEGIN{ printf("%.6f", (r/2.0)/1000.0) }')
+    # 取最小 RTT（更接近传播+固定栈开销的下界）
+    local RTT_MIN_MS=$(ping -n -c3 -i0.2 -w2 "$VM_IP" 2>/dev/null | awk -F'[/= ]' '/rtt/ {print $8}')
+    if [ -n "${RTT_MIN_MS:-}" ]; then
+      PR_S=$(awk -v r="$RTT_MIN_MS" 'BEGIN{ printf("%.6f", (r/2.0)/1000.0) }')
     fi
   fi
 
@@ -106,7 +126,7 @@ link_meta() {
 # ---- helpers: stop previous collectors in this LOG_DIR (TERM -> wait -> KILL) ----
 stop_collectors() {
   local did=0
-  for name in mpstat ifstat vmstat; do
+  for name in mpstat ifstat vmstat procmon; do
     local pf="$LOG_DIR/${name}.pid"
     if [ -f "$pf" ]; then
       local PID=$(cat "$pf" 2>/dev/null || echo "")
@@ -120,6 +140,30 @@ stop_collectors() {
     fi
   done
   [ $did -eq 1 ] && echo "previous collectors stopped in $LOG_DIR" || true
+}
+
+# --- per-PID sampler: RSS + utime/stime (runs inside container) ---
+start_procmon() {
+  local OUT="$LOG_DIR/proc_metrics.jsonl"
+  local INTERVAL_MS=${PROC_INTERVAL_MS:-1000}
+  # integer seconds for portability (busybox sh)
+  local INTERVAL_SEC=$(( (INTERVAL_MS + 500) / 1000 ))
+  [ $INTERVAL_SEC -lt 1 ] && INTERVAL_SEC=1
+  # detect PIDs once based on PROC_MATCH (case-insensitive); fallback to 1
+  local PIDS=$(docker exec -e PROC_MATCH="${PROC_MATCH}" "$CONTAINER" sh -lc '
+PIDS=""; for p in /proc/[0-9]*; do bn=${p##*/}; f="/proc/$bn/comm"; [ -r "$f" ] || continue; c=$(cat "$f"); echo "$c" | grep -Eiq "$PROC_MATCH" || continue; PIDS="$PIDS $bn"; done; echo ${PIDS# }' 2>/dev/null || true)
+  [ -z "$PIDS" ] && PIDS="1"
+  # host-side while loop with single-frame sampling (more robust)
+
+  local INNER_STATIC='TS=$(( $(date +%s) * 1000 )); for pid in '$PIDS'; do if [ -r /proc/$pid/stat ]; then LINE=$(cat /proc/$pid/stat 2>/dev/null) || continue; REST=${LINE#*) }; set -- $REST; UT=${12}; ST=${13}; RSS=$( (grep -m1 "Rss:" /proc/$pid/smaps_rollup 2>/dev/null | tr -s " " | cut -d" " -f2) || true ); if [ -z "$RSS" ]; then PAGES=$(cut -d" " -f2 /proc/$pid/statm 2>/dev/null) && RSS=$(( ${PAGES:-0} * 4 )); fi; printf "{\"ts_ms\":%s,\"pid\":%s,\"rss_kb\":%s,\"utime\":%s,\"stime\":%s}\n" "$TS" "$pid" "${RSS:-0}" "${UT:-0}" "${ST:-0}"; fi; done'
+  local INNER_REFRESH='TS=$(( $(date +%s) * 1000 )); PIDS=$(for p in /proc/[0-9]*; do bn=${p##*/}; f="/proc/$bn/comm"; [ -r "$f" ] || continue; c=$(cat "$f"); echo "$c" | grep -Eiq "$PROC_MATCH" || continue; echo -n "$bn "; done); for pid in $PIDS; do if [ -r /proc/$pid/stat ]; then LINE=$(cat /proc/$pid/stat 2>/dev/null) || continue; REST=${LINE#*) }; set -- $REST; UT=${12}; ST=${13}; RSS=$( (grep -m1 "Rss:" /proc/$pid/smaps_rollup 2>/dev/null | tr -s " " | cut -d" " -f2) || true ); if [ -z "$RSS" ]; then PAGES=$(cut -d" " -f2 /proc/$pid/statm 2>/dev/null) && RSS=$(( ${PAGES:-0} * 4 )); fi; printf "{\"ts_ms\":%s,\"pid\":%s,\"rss_kb\":%s,\"utime\":%s,\"stime\":%s}\n" "$TS" "$pid" "${RSS:-0}" "${UT:-0}" "${ST:-0}"; fi; done'
+  if [ "${PROC_REFRESH}" = "1" ]; then
+    nohup bash -c "while :; do docker exec -e PROC_MATCH='$PROC_MATCH' '$CONTAINER' sh -lc '$INNER_REFRESH' >> '$OUT' 2>>'$LOG_DIR/procmon.err'; sleep $INTERVAL_SEC; done" >/dev/null 2>&1 &
+  else
+    nohup bash -c "while :; do docker exec '$CONTAINER' sh -lc '$INNER_STATIC' >> '$OUT' 2>>'$LOG_DIR/procmon.err'; sleep $INTERVAL_SEC; done" >/dev/null 2>&1 &
+  fi
+  echo $! > "$LOG_DIR/procmon.pid"
+  echo "proc sampler started (container=$CONTAINER, PIDS=$PIDS, interval=${INTERVAL_SEC}s) → $OUT"
 }
 
 if [ "$CMD" = "start" ]; then
@@ -139,6 +183,11 @@ if [ "$CMD" = "start" ]; then
   # MEM：带时间戳（-t），单位 MB
   nohup bash -c 'vmstat -Sm -t 1 > "$0"' "$LOG_DIR/mem.log" >/dev/null 2>&1 &
   echo $! > "$LOG_DIR/vmstat.pid"
+
+  # per-PID sampler (optional, default on). Set PROC_SAMPLING=0 to disable
+  if [ "${PROC_SAMPLING:-1}" = "1" ]; then
+    start_procmon || true
+  fi
 
   echo "collectors started → $LOG_DIR"
 

@@ -1,26 +1,29 @@
-# Trace Collection and Real Workload Replay - Runbook (Cloud VM -> Endpoint-Edge-Cloud)
+# Cloud-only Trace Collection Toolkit (App-agnostic)
 
-This project turns a FastAPI service into a real-workload trace source, standardizes traces to CCTF, and supports one‑click local runs. It is ready to extend to endpoint‑edge‑cloud with minimal changes.
+This toolkit collects cloud-node traces in an app-agnostic way and standardizes them to CCTF. It separates generic collection (host/links/per-PID) from app-adapter traces (invocations), focusing on cloud-only multi-node setups.
 
-## Quick start (single VM, real endpoints)
+## Quick start (single cloud VM)
 
-Prereqs: Docker installed
+Prereqs: Docker installed (for the app container); sysstat/ifstat/vmstat on host (make setup)
 
-1) Install host tools (vegeta/sysstat/ifstat, once)
+1) Install host tools (once)
    make setup
 
-2) Build image (only after code changes)
-   make build
+2) Start your app container (optional; default name 'svc')
+   make run   # or start your own container; the collector is app-agnostic
 
-3) One‑click lightweight runs (real endpoints)
-   - make real-all     # run json→gzip→hash→kvset→kvget sequentially
-   - Alternatives: make real-json | real-gzip | real-hash | real-kvset | real-kvget
+3) Start trace collection (generic, app-agnostic)
+   make start-collect RUN_ID=$RUN_ID NODE_ID=cloud0 STAGE=cloud VM_IP=127.0.0.1 IFACE=lo PROC_SAMPLING=1 CONTAINER=svc
+   # Options:
+   #   IFACE=<nic> VM_IP=<peer-or-gateway-ip>  # to derive NIC and PR_s from ping
+   #   PROC_MATCH='python|ffmpeg|onnxruntime|java|node|nginx|torchserve'  # per-PID filter
+   #   PROC_REFRESH=1  # refresh PID set each second (for respawning processes)
 
-Note: RUN_ID now respects environment override (Makefile uses `RUN_ID ?=`). You may `echo "RUN_ID=..." > run_id.env` then `source run_id.env` before make targets.
+4) Stop & parse
+   make stop-collect RUN_ID=$RUN_ID
+   make parse RUN_ID=$RUN_ID
 
-Defaults (override as needed):
-- REAL_RATE=40 (req/s), REAL_DUR=20s, REAL_SIZE=8192 bytes
-- Override e.g.: make real-json REAL_RATE=60 REAL_DUR=30s REAL_SIZE=16384
+Note: RUN_ID is honored from environment. You may `echo "RUN_ID=..." > run_id.env` then `source run_id.env` before running make targets.
 
 Artifacts (latest RUN_ID under logs/<RUN_ID>/):
 - events.jsonl (server app_events), events_client.jsonl
@@ -32,22 +35,36 @@ Artifacts (latest RUN_ID under logs/<RUN_ID>/):
 
 Note: No automatic health check. The /work endpoint exists only for manual checks; real-* targets hit real endpoints only.
 
-## Real endpoints (business-like)
-- POST /json/validate       # JSON parse/validate (returns 200 or 400)
-- POST /blob/gzip           # binary gzip
-- POST /blob/gunzip         # binary gunzip
-- POST /hash/sha256         # returns hex digest
-- POST /kv/set/{key}        # SQLite set
-- GET  /kv/get/{key}        # SQLite get
+## What gets collected (generic)
+- node_meta.json
+  - run_id (string)
+  - node (string), stage (string, default cloud), host (string), iface (string)
+  - cpu_cores (int), mem_mb (int)
+  - cpu_model (string), cpu_freq_mhz (int, MHz)
+- link_meta.json
+  - BW_bps (int, bits/s), PR_s (float or null, seconds)
+- resources.jsonl (host CPU/MEM time series)
+  - {ts_ms:int, cpu_util:float%} from mpstat; {ts_ms:int, mem_free_mb:int}
+- links.jsonl (NIC time series)
+  - {ts_ms:int, link:"<node>.nic", rx_Bps:int, tx_Bps:int}
+- proc_metrics.jsonl (per-PID, optional but recommended)
+  - {ts_ms:int, pid:int, rss_kb:int, utime:int, stime:int}  # utime/stime in ticks (CLK_TCK≈100)
+- cctf/
+  - nodes.json (copy of node identity + cpu_model/cpu_freq_mhz)
+  - links.json (NIC edge with BW_bps/PR_s)
+  - host_metrics.jsonl, link_metrics.jsonl (standardized)
+  - invocations.jsonl (if present; from app adapter)
+  - proc_metrics.jsonl, proc_cpu.jsonl, proc_rss.jsonl (if present)
 
-Optional downstream forwarding (multi-hop real workload):
-- Env DEFAULT_NEXT_URL=http://host:8080/<endpoint>
-- Or per-request header: X-Next-Url: http://host:8080/<endpoint>
-- If set, each endpoint forwards the locally processed payload to the next hop, with trace headers.
-- Default is OFF. Single-node runs behave the same as before.
 
-Baseline (synthetic) endpoint (kept for health/baseline, not used by real-*):
-- /work?cpu_ms=..&resp_kb=..&call_url=.. (supports cascading via call_url)
+### Generic vs. App-adapter layers
+- Generic (always-on, app-agnostic): node_meta, link_meta, resources (cpu/mem), links (nic), per-PID proc_metrics
+- App-adapter (provides task boundaries; choose one if needed):
+  - HTTP/gRPC: access_log adapter (Nginx/Envoy) → invocations.jsonl
+  - Batch/CLI (e.g., FFmpeg): lightweight wrapper → invocations.jsonl
+  - Queue/Jobs: scheduler events export → invocations.jsonl
+Note: You can run only the generic layer to get host/links/proc metrics; add an adapter later when you need per-task traces.
+
 
 ## Trace schema (minimal and sufficient)
 This repo emits six record classes to support “replayable scheduling/evaluation + real-run comparison”:
@@ -62,136 +79,88 @@ This repo emits six record classes to support “replayable scheduling/evaluatio
 
 CCTF outputs under logs/<RUN_ID>/cctf/ are ready for simulators.
 
-## Extend to endpoint‑edge‑cloud (same image, three nodes)
+## Cloud-only multi-node workflow (how to run)
 
 ### Prerequisites
-- Three VMs with time sync (chrony/ntp) and mutual TCP/8080 reachability via host bridge
+- N cloud VMs with time sync (chrony/ntp)
 - Same codebase on all VMs (git clone or copy)
-- Docker installed on all VMs
+- Docker installed on all VMs (for your app container, optional)
 
-### Step 1: Start applications (one container per VM)
+### Step 1: Start application container (optional)
+- The collector is app-agnostic. If you have an app container, start it now (default name 'svc').
+- Otherwise you can still run generic collectors (host/links/proc) without an app.
 
-You can use scenarios to load per-role envs: `SCEN=cloud|edge|endpoint make run`.
 
-Cloud VM:
-```bash
-SCEN=cloud VM_IP=<cloud_ip> make run
-```
+### Step 2: Start trace collection (each cloud VM)
 
-Edge VM:
-```bash
-SCEN=edge VM_IP=<edge_ip> make run
-```
-
-Endpoint VM:
-```bash
-SCEN=endpoint VM_IP=<endpoint_ip> make run
-```
-
-Optional manual check (any VM): `curl http://127.0.0.1:8080/work`
-
-### Step 2: Start trace collection (each VM separately)
-
-Set unified RUN_ID across all VMs (Makefile reads run_id.env and honors env):
+Set unified RUN_ID across all VMs (optional but recommended):
 ```bash
 echo "RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)" > run_id.env
 # copy to all VMs, then on each:
 source run_id.env
 ```
 
-Start system-level collection on each VM (put variables AFTER make for highest precedence):
+Start collection on each VM (put variables AFTER make for highest precedence):
 ```bash
-# Endpoint
-make start-collect RUN_ID=$RUN_ID NODE_ID=ep0   STAGE=endpoint VM_IP=<endpoint_ip> IFACE=<iface>
-# Edge
-make start-collect RUN_ID=$RUN_ID NODE_ID=edge0 STAGE=edge     VM_IP=<edge_ip>     IFACE=<iface>
-# Cloud
-make start-collect RUN_ID=$RUN_ID NODE_ID=cloud0 STAGE=cloud   VM_IP=<cloud_ip>    IFACE=<iface>
+make start-collect RUN_ID=$RUN_ID NODE_ID=cloud0 STAGE=cloud VM_IP=<gateway_or_peer_ip> IFACE=<iface> \
+  PROC_SAMPLING=1 CONTAINER=svc PROC_MATCH='python|ffmpeg|onnxruntime|java|node|nginx|torchserve' PROC_REFRESH=0
 ```
 Notes:
-- Always start containers first (make run), then start-collect.
+- Start your app container first if needed (make run), then start-collect.
 - IFACE should be the external NIC (e.g., ens2). If omitted, the script infers via `ip route get <VM_IP>`.
-- The collector script pre-stops any previous collectors for the same RUN_ID and uses robust stop (TERM→KILL) to avoid residue.
+- The collector pre-stops any previous collectors for the same RUN_ID and uses robust stop (TERM→KILL).
+- App-level events: if you use our FastAPI service, invocations are emitted automatically; otherwise, use adapters under tools/adapters/ to generate invocations.jsonl when needed.
 
-Notes:
-- App-level events are automatically collected by tracekit middleware.
-- Request trace_id is now propagated via request.state injected by middleware, so cross-VM trace_id stays consistent while parent/child spans reflect hop relationships.
 
-### Step 3: Trigger real workload chain
-
-Example real chain: JSON validation (endpoint) → GZIP compression (edge) → KV storage (cloud)
-
-From endpoint VM, send JSON request (will auto-forward if DEFAULT_NEXT_URL set):
-```bash
-echo '{"a":1}' > /tmp/body.json
-curl -X POST -H 'Content-Type: application/json' \
-  --data-binary @/tmp/body.json http://<endpoint_ip>:8080/json/validate
-```
-
-Alternative (per-request control without DEFAULT_NEXT_URL):
-```bash
-curl -H 'X-Next-Url: http://<edge_ip>:8080/blob/gzip' \
-  -X POST -H 'Content-Type: application/json' \
-  --data-binary @/tmp/body.json http://<endpoint_ip>:8080/json/validate
-```
 
 ### Step 4: Stop collection and parse (each VM separately)
 
 
-### End-to-end checklist (copy-paste)
+### End-to-end checklist (multi-node, cloud-only)
 
 Assumptions:
 - Use one unified RUN_ID via run_id.env on all VMs
 - Put variables AFTER make (highest precedence)
-- Replace <cloud_ip>/<edge_ip>/<endpoint_ip>/<iface> with your values (e.g., ens2)
+- Replace <gateway_or_peer_ip>/<iface> per VM (e.g., ens2)
 
 0) Unify RUN_ID (once)
 ```bash
-# On one VM (e.g., endpoint)
 echo "RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)" > run_id.env
-# Copy to the other two, then on each VM:
-source run_id.env && echo $RUN_ID
+# distribute to all VMs
 ```
 
-1) Cloud (192.168.x.x)
+On each cloud VM (repeat per node):
 ```bash
-cd /home/cloud0_gxie/Tracekit && source run_id.env
-# clean any old collectors (all RUN_IDs)
+source run_id.env
+# clean any old collectors for all runs (optional)
 for d in logs/*; do RUN_ID="$(basename "$d")" RUN_ID="$RUN_ID" bash tools/collect_sys.sh stop || true; done
-pkill -f 'mpstat 1' || true; pkill -f 'ifstat -i ' || true; pkill -f 'vmstat -Sm -t 1' || true
-# container
-make build && make stop
-SCEN=cloud VM_IP=<cloud_ip> make run
+# (optional) build & run your app container
+make build && make stop || true
+SCEN=cloud VM_IP=<this_vm_ip> make run || true
 # start collection (variables after make)
-make start-collect RUN_ID=$RUN_ID NODE_ID=cloud0 STAGE=cloud VM_IP=<cloud_ip> IFACE=<iface>
+make start-collect RUN_ID=$RUN_ID NODE_ID=<cloudX> STAGE=cloud VM_IP=<gateway_or_peer_ip> IFACE=<iface> \
+  PROC_SAMPLING=1 CONTAINER=svc PROC_MATCH='python|ffmpeg|onnxruntime|java|node|nginx|torchserve' PROC_REFRESH=0
 # quick check
 jq . logs/$RUN_ID/node_meta.json | egrep '"node"|"stage"|"iface"'
 ```
 
-2) Edge (192.168.x.x)
-```bash
-cd /home/edge0_gxie/Tracekit && source run_id.env
-for d in logs/*; do RUN_ID="$(basename "$d")" RUN_ID="$RUN_ID" bash tools/collect_sys.sh stop || true; done
-pkill -f 'mpstat 1' || true; pkill -f 'ifstat -i ' || true; pkill -f 'vmstat -Sm -t 1' || true
-make build && make stop
-SCEN=edge VM_IP=<edge_ip> make run
-make start-collect RUN_ID=$RUN_ID NODE_ID=edge0 STAGE=edge VM_IP=<edge_ip> IFACE=<iface>
-jq . logs/$RUN_ID/node_meta.json | egrep '"node"|"stage"|"iface"'
-```
+### Outputs (files, fields, units)
+- node_meta.json: {run_id, node, stage, host, iface, cpu_cores, mem_mb, cpu_model, cpu_freq_mhz(MHz)}
+- link_meta.json: {iface, BW_bps(bits/s), PR_s(seconds|null)}
+- resources.jsonl: {ts_ms(ms), cpu_util(%), mem_free_mb(MB)}
+- links.jsonl: {ts_ms(ms), link, rx_Bps(bytes/s), tx_Bps(bytes/s)}
+- proc_metrics.jsonl: {ts_ms(ms), pid, rss_kb(KB), utime(ticks), stime(ticks)}
+- cctf/
+  - nodes.json, links.json
+  - host_metrics.jsonl, link_metrics.jsonl
+  - invocations.jsonl (if present)
+  - proc_metrics.jsonl (raw), proc_cpu.jsonl {ts_ms, pid, cpu_ms(ms)}, proc_rss.jsonl {ts_ms, pid, rss_kb}
 
-3) Endpoint (192.168.x.x)
-```bash
-cd /home/endpoint0_gxie/Tracekit && source run_id.env
-for d in logs/*; do RUN_ID="$(basename "$d")" RUN_ID="$RUN_ID" bash tools/collect_sys.sh stop || true; done
-pkill -f 'mpstat 1' || true; pkill -f 'ifstat -i ' || true; pkill -f 'vmstat -Sm -t 1' || true
-make build && make stop
-SCEN=endpoint VM_IP=<endpoint_ip> make run
-make start-collect RUN_ID=$RUN_ID NODE_ID=ep0 STAGE=endpoint VM_IP=<endpoint_ip> IFACE=<iface>
-jq . logs/$RUN_ID/node_meta.json | egrep '"node"|"stage"|"iface"'
-```
 
-4) Trigger chain (on endpoint)
+### Step 3: Stop & parse (each VM)
 ```bash
+make stop-collect RUN_ID=$RUN_ID && make parse RUN_ID=$RUN_ID
+```
 echo '{"a":1}' > /tmp/body.json
 curl -X POST -H 'Content-Type: application/json' --data-binary @/tmp/body.json http://<endpoint_ip>:8080/json/validate
 ```
@@ -230,57 +199,19 @@ Each VM produces:
 - logs/$RUN_ID/events.jsonl (app_events with trace_id/span_id/parent_id across VMs)
 - logs/$RUN_ID/cctf/ (standardized for simulators)
 
-### Step 5: Merge multi-VM CCTF (optional, future)
-
-Collect all three logs/$RUN_ID/cctf/ directories to one machine and merge:
+### Merge multi-VM CCTF (optional)
+Collect logs/$RUN_ID/cctf/ from all nodes onto one machine and merge:
 - nodes.json, links.json: array merge + dedup
 - *.jsonl files: concatenate + time-sort
-- Result: unified_cctf/ ready for simulator replay
+- Result: unified_cctf/$RUN_ID ready for simulator replay
 
-(Merge script tools/merge_cctf.py to be added later)
+## Troubleshooting (quick)
+- RUN_ID mismatch at parse: ensure start/stop/parse share the same RUN_ID
+- Port 8080 busy: make stop or adjust -p hostPort:8080
+- Host tools missing: make setup (installs vegeta/sysstat/ifstat)
+- No per-PID lines: check logs/<RUN>/procmon.err; tune CONTAINER/PROC_MATCH/PROC_REFRESH
 
-## Back up before deleting this VM
-Minimum:
-- Code repository (push to remote Git, or tar.gz)
-- CCTF artifacts: logs/<RUN_ID>/cctf/ (for replay)
-Optional:
-- Full logs/<RUN_ID>/ (raw + CCTF), Docker image (docker save)
+## Notes
+- Generic vs App-adapter layers are decoupled. You can run the generic collector alone.
+- cctf/ outputs can be consumed by simulators or converted to OpenDC later.
 
-## Troubleshooting
-- service not ready during real-*:
-  - docker logs svc; ensure app/tracekit.py is present in image (Dockerfile COPY app.py tracekit.py .)
-- RUN_ID mismatch at parse:
-  - Pass RUN_ID through make targets (already fixed); ensure start/stop/parse share the same RUN_ID
-- Port 8080 busy:
-  - make stop or remove the container; adjust -p hostPort:8080
-- Vegeta not found:
-  - make setup (installs vegeta)
-
-## Notes and glossary
-- “发压/压测” = send sustained requests using vegeta to simulate load
-- Health check uses /work; real-* targets use real endpoints only
-- Simulators: you can feed logs/<RUN_ID>/cctf into your chosen simulator; merging multi‑VM CCTF can be added later
-
-
-## TODOs (next steps) and Goals
-
-### Goals
-- Short term (cloud only): collect real workload traces and standardize to CCTF; validate replay feasibility
-- Mid term (endpoint-edge-cloud): run same image on 3 VMs with real multi-hop forwarding; collect per-VM CCTF and merge; replay end-to-end
-- Long term: evaluate scheduling/placement strategies using replayed traces; compare with real runs
-
-### TODOs (not yet done)
-- [ ] Multi-VM merge utility: tools/merge_cctf.py to combine nodes/links and time-sort *.jsonl
-- [ ] Real endpoints chain examples: docs/scenarios/real-chain.md with X-Next-Url examples
-- [ ] Optional: add scale/migrate events to placement_events.jsonl when replicas change
-- [ ] Optional: node_inventory: add CPU freq/MIPS and region/zone (env or metadata)
-- [ ] Optional: Makefile target for real-chain (endpoint→edge→cloud) once DEFAULT_NEXT_URL is configured per VM
-- [ ] Optional: Dockerfile CMD switch to JSON array form (signal handling best practice)
-- [ ] Optional: Add OpenTelemetry path later (collector + normalizer) if needed for cross-language services
-
-### Decisions captured
-- Keep /work for health/baseline only; real-* targets use only real endpoints
-- Trace collection decoupled into app/tracekit.py (middleware + lifecycle + in_flight + placement)
-- Real endpoints support optional downstream via DEFAULT_NEXT_URL or X-Next-Url; default OFF for single-node parity
-- CCTF minimal-and-sufficient set is the contract for simulators; parse_sys.py writes CCTF under logs/<RUN_ID>/cctf/
-- Single image runs across endpoint/edge/cloud; differentiation via STAGE/NODE_ID and optional DEFAULT_NEXT_URL

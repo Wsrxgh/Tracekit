@@ -127,7 +127,44 @@ with open(links_out, "w", encoding="utf-8") as lout:
                 })+"\n")
 print(f"[parse] links → {links_out}")
 
-# ---------- 6) 复制/汇总新增制品（placement 与 system_stats） ----------
+# ---------- 6) 标准化 per-PID 采样（proc_metrics → cctf） ----------
+proc_metrics = LOGS / "proc_metrics.jsonl"
+if proc_metrics.exists():
+    cctf_dir.mkdir(exist_ok=True)
+    # 直通导出（保留原始单位：rss_kb，utime/stime 为 tick）
+    import shutil as _sh
+    _sh.copy(proc_metrics, cctf_dir / "proc_metrics.jsonl")
+    # 可选：导出按采样差分的 CPU ms（方便后续导出 OpenDC Fragments）
+    try:
+        CLK_TCK = int(os.popen("getconf CLK_TCK").read().strip() or "100")
+    except Exception:
+        CLK_TCK = 100
+    proc_cpu_out = cctf_dir / "proc_cpu.jsonl"
+    proc_rss_out = cctf_dir / "proc_rss.jsonl"
+    last = {}
+    with open(proc_cpu_out, "w", encoding="utf-8") as cpu_out, open(proc_rss_out, "w", encoding="utf-8") as rss_out:
+        for line in open(proc_metrics, "r", encoding="utf-8", errors="ignore"):
+            try:
+                o = json.loads(line)
+            except:
+                continue
+            ts = o.get("ts_ms"); pid = o.get("pid")
+            rss_kb = o.get("rss_kb")
+            ut, st = o.get("utime"), o.get("stime")
+            if isinstance(ts, int) and isinstance(pid, int):
+                if isinstance(rss_kb, int):
+                    rss_out.write(json.dumps({"ts_ms": ts, "pid": pid, "rss_kb": rss_kb})+"\n")
+                key = pid
+                prev = last.get(key)
+                if prev and isinstance(ut, int) and isinstance(st, int):
+                    dt_ticks = max(0, (ut+st) - (prev[0]+prev[1]))
+                    cpu_ms = int(dt_ticks * 1000 / max(1, CLK_TCK))
+                    cpu_out.write(json.dumps({"ts_ms": ts, "pid": pid, "cpu_ms": cpu_ms})+"\n")
+                if isinstance(ut, int) and isinstance(st, int):
+                    last[key] = (ut, st)
+    print(f"[parse] copied proc_metrics and derived proc_cpu/proc_rss → {cctf_dir}")
+
+# ---------- 7) 复制/汇总新增制品（placement 与 system_stats） ----------
 for fname in ["placement_events.jsonl", "system_stats.jsonl"]:
     src = LOGS / fname
     if src.exists():
@@ -155,14 +192,21 @@ with open(cctf_dir / "nodes.json", "w") as f:
         "node_id": meta["node"],
         "stage": meta["stage"],
         "cpu_cores": meta["cpu_cores"],
-        "mem_mb": meta["mem_mb"]
+        "mem_mb": meta["mem_mb"],
+        "cpu_model": meta.get("cpu_model"),
+        "cpu_freq_mhz": meta.get("cpu_freq_mhz")
     }], f, indent=2)
 # 链路（单网卡示例）
+# If link_meta.json exists, carry BW/PR into CCTF link
+link_meta_path = LOGS / "link_meta.json"
+link_obj = {"u": meta["node"], "v": f'{meta["node"]}.net', "BW_bps": None, "PR_s": None}
+if link_meta_path.exists():
+    lm = json.load(open(link_meta_path, "r"))
+    if isinstance(lm, dict):
+        link_obj["BW_bps"] = lm.get("BW_bps")
+        link_obj["PR_s"] = lm.get("PR_s")
 with open(cctf_dir / "links.json", "w") as f:
-    json.dump([{
-        "u": meta["node"], "v": f'{meta["node"]}.net',
-        "BW_bps": None, "PR_s": None
-    }], f, indent=2)
+    json.dump([link_obj], f, indent=2)
 # 模块清单（若存在）
 mod_inv = LOGS / "module_inventory.json"
 if mod_inv.exists():
