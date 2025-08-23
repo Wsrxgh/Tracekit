@@ -15,6 +15,10 @@ if not RUN_ID:
 assert RUN_ID, "No RUN_ID and no logs/* found"
 LOGS = logs_root / RUN_ID
 print(f"[parse] RUN_ID={RUN_ID}")
+# Ensure CCTF output directory is defined early (used by multiple sections)
+cctf_dir = LOGS / "cctf"
+cctf_dir.mkdir(exist_ok=True)
+
 
 # Resolve identity for this parse run
 NODE_ID = os.environ.get("NODE_ID", "vm0")
