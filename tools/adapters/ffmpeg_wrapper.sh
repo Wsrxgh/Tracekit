@@ -6,7 +6,7 @@
 # Usage:
 #   RUN_ID=2025... NODE_ID=cloud0 STAGE=cloud \
 #   ./tools/adapters/ffmpeg_wrapper.sh -i in.mp4 -vf scale=1280:720 -c:v libx264 out.mp4
-#   # events will be appended to logs/$RUN_ID/invocations.jsonl
+#   # events will be appended to logs/$RUN_ID/events.ffmpeg.jsonl
 #
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -15,6 +15,7 @@ LOG_DIR="$ROOT/logs/$RUN_ID"
 mkdir -p "$LOG_DIR"
 NODE_ID=${NODE_ID:-vm0}
 STAGE=${STAGE:-cloud}
+EVENT_FILE="$LOG_DIR/events.ffmpeg.jsonl"
 
 # find input/output media names (best-effort)
 INPUT=""
@@ -39,16 +40,14 @@ set -e
 TS1=$(date +%s%3N)
 if [ -n "$OUTPUT" ] && [ -f "$OUTPUT" ]; then BYTES_OUT=$(stat -c %s "$OUTPUT" 2>/dev/null || echo 0); fi
 
-# write record
-cat >> "$LOG_DIR/invocations.jsonl" <<JSON
+# write record (minimal fields; parse_sys.py will copy events.*.jsonl as invocations)
+cat >> "$EVENT_FILE" <<JSON
 {"trace_id": null, "span_id": null, "parent_id": null,
  "module_id": "ffmpeg", "instance_id": null,
  "ts_enqueue": $TS0, "ts_start": $TS0, "ts_end": $TS1,
  "node": "$NODE_ID", "stage": "$STAGE",
  "method": "CLI", "path": "ffmpeg",
  "bytes_in": $BYTES_IN, "bytes_out": $BYTES_OUT,
- "cpu_time_ms": null, "queue_time_ms": 0,
- "service_time_ms": $((TS1-TS0)), "rt_ms": $((TS1-TS0)),
  "status": $RC }
 JSON
 

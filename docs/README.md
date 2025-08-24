@@ -10,7 +10,7 @@ Prereqs: Docker installed (for the app container); sysstat/ifstat/vmstat on host
    make setup
 
 2) Start your app container (optional; default name 'svc')
-   make run   # or start your own container; the collector is app-agnostic
+   make run   # This uses the example service under examples/fastapi_svc/. You can skip this; the collector is app-agnostic.
 
 3) Start trace collection (generic, app-agnostic)
    make start-collect RUN_ID=$RUN_ID NODE_ID=cloud0 STAGE=cloud VM_IP=127.0.0.1 IFACE=lo PROC_SAMPLING=1 CONTAINER=svc

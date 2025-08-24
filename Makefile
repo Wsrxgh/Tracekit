@@ -29,12 +29,14 @@ setup:
 	  V=12.11.1; wget -q https://github.com/tsenart/vegeta/releases/download/v$$V/vegeta_$$V_linux_amd64.tar.gz && \
 	  tar -xzf vegeta_$$V_linux_amd64.tar.gz && sudo mv vegeta /usr/local/bin/ && rm -f vegeta_$$V_linux_amd64.tar.gz; \
 	fi
-	@python3 -m pip -q install -r app/requirements.txt || true
+	# Example service deps (optional)
+	@python3 -m pip -q install -r examples/fastapi_svc/requirements.txt || true
 	@mkdir -p $(LOG_DIR) logs
 	@echo "setup done"
 
 build:
-	docker build -t $(IMG) ./app
+	# Example service image (optional)
+	docker build -t $(IMG) ./examples/fastapi_svc
 
 run:
 	mkdir -p $(LOG_DIR)
