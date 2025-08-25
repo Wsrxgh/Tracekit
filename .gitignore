@@ -30,9 +30,20 @@ coverage.xml
 
 # Project-specific
 logs/
+output/
+outputs/
 *.db
 *.bin
 *.gz
 results.bin
+*.jsonl
+*.parquet
 
+# Runtime files
 run_id.env
+body.bin
+
+# Temporary/backup files
+*.tmp
+*.bak
+*~

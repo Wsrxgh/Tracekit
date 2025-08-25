@@ -43,7 +43,10 @@ with open(merged_events, "w", encoding="utf-8") as out:
                     obj = json.loads(line)
                     rows.append(obj)
                 except: pass
-    rows.sort(key=lambda x: (x.get("ts_ms", 0), x.get("pid", 0)))
+    # Sort by timestamp - try different timestamp fields
+    def get_timestamp(x):
+        return x.get("ts_ms") or x.get("ts_enqueue") or x.get("ts_start") or 0
+    rows.sort(key=lambda x: (get_timestamp(x), x.get("pid", 0)))
     for r in rows:
         # 补默认字段
         r.setdefault("node", NODE_ID)
