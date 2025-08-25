@@ -52,7 +52,9 @@ run:
 	@echo "container started (healthcheck=disabled) (run_id=$(RUN_ID))"
 	@echo $(RUN_ID) > $(LOG_DIR)/.run_id
 start-collect:
-	@RUN_ID=$(RUN_ID) NODE_ID=$(NODE_ID) STAGE=$(STAGE) IFACE=$(IFACE) VM_IP=$(VM_IP) bash tools/collect_sys.sh start
+	@RUN_ID=$(RUN_ID) NODE_ID=$(NODE_ID) STAGE=$(STAGE) IFACE=$(IFACE) VM_IP=$(VM_IP) \
+	 PROC_SAMPLING=$$PROC_SAMPLING PROC_REFRESH=$$PROC_REFRESH PROC_INTERVAL_MS=$$PROC_INTERVAL_MS \
+	 PROC_MATCH="$$PROC_MATCH" bash tools/collect_sys.sh start
 
 load:
 	@RUN_ID=$(RUN_ID) bash tools/drive_load.sh $(VM_IP) $(RATE) $(DURATION) $(CPU_MS) $(RESP_KB) '$(CALL_URL)'
