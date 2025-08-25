@@ -10,6 +10,8 @@
 #
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+# Try to load RUN_ID from repo root if not set
+if [ -z "${RUN_ID:-}" ] && [ -f "$ROOT/run_id.env" ]; then . "$ROOT/run_id.env" || true; fi
 RUN_ID=${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}
 LOG_DIR="$ROOT/logs/$RUN_ID"
 mkdir -p "$LOG_DIR"
@@ -32,25 +34,30 @@ BYTES_IN=0
 BYTES_OUT=0
 if [ -n "$INPUT" ] && [ -f "$INPUT" ]; then BYTES_IN=$(stat -c %s "$INPUT" 2>/dev/null || echo 0); fi
 
-# run ffmpeg
+# generate trace id if absent; run ffmpeg in background to capture PID
+if [ -z "${TRACE_ID:-}" ]; then
+  if command -v uuidgen >/dev/null 2>&1; then TRACE_ID=$(uuidgen); else TRACE_ID=$(date +%s%N); fi
+fi
 set +e
-ffmpeg "$@"
-RC=$?
+ffmpeg "$@" &
+FFPID=$!
+wait "$FFPID"; RC=$?
 set -e
 TS1=$(date +%s%3N)
 if [ -n "$OUTPUT" ] && [ -f "$OUTPUT" ]; then BYTES_OUT=$(stat -c %s "$OUTPUT" 2>/dev/null || echo 0); fi
 
 # write record (minimal fields; parse_sys.py will copy events.*.jsonl as invocations)
 cat >> "$EVENT_FILE" <<JSON
-{"trace_id": null, "span_id": null, "parent_id": null,
+{"trace_id": "${TRACE_ID:-}", "span_id": null, "parent_id": null,
  "module_id": "ffmpeg", "instance_id": null,
  "ts_enqueue": $TS0, "ts_start": $TS0, "ts_end": $TS1,
  "node": "$NODE_ID", "stage": "$STAGE",
  "method": "CLI", "path": "ffmpeg",
+ "input": "${in_base:-}", "output": "${out_base:-}", "pid": ${FFPID:-0},
  "bytes_in": $BYTES_IN, "bytes_out": $BYTES_OUT,
  "status": $RC }
 JSON
 
-echo "invocation appended → $LOG_DIR/invocations.jsonl" >&2
+echo "invocation appended → $EVENT_FILE" >&2
 exit $RC
 
