@@ -3,6 +3,7 @@
 Worker: pulls tasks from per-node queue q:<NODE_ID> and runs ffmpeg via wrapper.
 No scheduling events are logged. Only ffmpeg completion is appended by the wrapper.
 """
+from __future__ import annotations
 import argparse, os, sys, json, shlex, subprocess, signal, threading
 from pathlib import Path
 import redis
@@ -20,13 +21,12 @@ def run_task(task: dict, root: Path) -> int:
     cmd = [
         "bash", str(root / "tools" / "adapters" / "ffmpeg_wrapper.sh"),
         "-i", task["input"],
-        "-o", str(out_path),
-        "--",
         "-vf", f"scale={task['scale']}",
         "-c:v", "libx264",
         "-preset", str(task["preset"]),
         "-crf", str(task["crf"]),
         "-c:a", "copy",
+        str(out_path),
     ]
     env = os.environ.copy()
     # RUN_ID optional at this stage; wrapper will write events if present

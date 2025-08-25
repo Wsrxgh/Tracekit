@@ -3,6 +3,7 @@
 Dispatcher: assigns local input files to per-node Redis queues by a simple round-robin policy.
 No scheduling events are logged; routing is deterministic.
 """
+from __future__ import annotations
 import argparse, os, sys, json, time, subprocess
 from pathlib import Path
 import redis
@@ -44,18 +45,15 @@ def probe_duration_seconds(path: Path) -> float:
 
 
 def duration_greedy_assign(files: list[Path], nodes: list[str]) -> dict[str, list[dict]]:
-    # LPT-like greedy using duration as weight
+    # LPT-like greedy using duration as weight (offline assignment)
     weights = []
     for p in files:
         d = probe_duration_seconds(p)
         weights.append((d, p))
-    # sort by duration desc
     weights.sort(key=lambda x: x[0], reverse=True)
-    # running load per node
     load = {n: 0.0 for n in nodes}
     tasks = {n: [] for n in nodes}
     for d, p in weights:
-        # choose node with min load
         n = min(nodes, key=lambda k: load[k])
         base = p.stem
         out = f"outputs/{base}_720p_crf28.mp4"
@@ -70,6 +68,15 @@ def duration_greedy_assign(files: list[Path], nodes: list[str]) -> dict[str, lis
     return tasks
 
 
+def duration_pairs(files: list[Path]) -> list[tuple[float, Path]]:
+    pairs = []
+    for p in files:
+        d = probe_duration_seconds(p)
+        pairs.append((d, p))
+    pairs.sort(key=lambda x: x[0], reverse=True)
+    return pairs
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--inputs", required=True)
@@ -80,6 +87,11 @@ def main():
     ap.add_argument("--nodes", default=",".join(DEFAULT_NODES))
     ap.add_argument("--policy", default="rr3")
     ap.add_argument("--redis", default="redis://localhost:6379/0")
+    # Dribble mode options
+    ap.add_argument("--drip", action="store_true", help="Enable dribble (small-batch) enqueue loop")
+    ap.add_argument("--batch-size", type=int, default=1)
+    ap.add_argument("--dribble-interval", type=float, default=1.0)
+    ap.add_argument("--backlog-limit", type=int, default=1, help="Max queued tasks per node (approx by LLEN)")
     args = ap.parse_args()
 
     inputs_dir = Path(args.inputs)
@@ -102,6 +114,42 @@ def main():
         tasks = rr3_assign(files, nodes)
     elif args.policy in ("duration-greedy", "lpt-duration"):
         tasks = duration_greedy_assign(files, nodes)
+    elif args.policy in ("duration-online", "online-duration"):
+        # Online dribble: decide destination per task based on current backlog and running load
+        pairs = duration_pairs(files)  # [(dur, Path), ...] sorted desc
+        r = redis.Redis.from_url(args.redis)
+        load = {n: 0.0 for n in nodes}  # estimated cumulative load
+        total = 0
+        idx = 0
+        while idx < len(pairs):
+            # refresh backlog lengths
+            backlog = {n: int(r.llen(f"q:{n}")) for n in nodes}
+            sent = 0
+            while sent < args.batch_size and idx < len(pairs):
+                d, p = pairs[idx]
+                # choose nodes whose backlog < limit; if none, break to wait
+                candidates = [n for n in nodes if backlog.get(n, 0) < args.backlog_limit]
+                if not candidates:
+                    break
+                # among candidates, prefer smaller backlog, then smaller load
+                n = min(candidates, key=lambda k: (backlog.get(k, 0), load.get(k, 0)))
+                base = p.stem
+                t = {
+                    "input": str(p),
+                    "output": str(outputs_dir / f"{base}_{args.scale.replace(':','x')}_crf{args.crf}.mp4"),
+                    "scale": args.scale, "preset": args.preset, "crf": args.crf,
+                }
+                r.rpush(f"q:{n}", json.dumps(t))
+                backlog[n] = backlog.get(n, 0) + 1
+                load[n] = load.get(n, 0) + max(0.0, d)
+                total += 1
+                sent += 1
+                idx += 1
+            print(f"[online] batch={sent}, total={total}, backlog=" + ", ".join(f"{k}:{backlog[k]}" for k in nodes))
+            if idx < len(pairs):
+                time.sleep(max(0.0, args.dribble_interval))
+        print(f"[online] done, total enqueued={total}")
+        return
     else:
         print(f"unknown policy: {args.policy}", file=sys.stderr)
         sys.exit(2)
@@ -117,13 +165,38 @@ def main():
 
     # enqueue
     r = redis.Redis.from_url(args.redis)
-    total = 0
-    for n in nodes:
-        q = f"q:{n}"
-        for t in tasks[n]:
-            r.rpush(q, json.dumps(t))
-            total += 1
-    print(f"enqueued {total} tasks: " + ", ".join(f"{n}={len(tasks[n])}" for n in nodes))
+
+    if not args.drip:
+        total = 0
+        for n in nodes:
+            q = f"q:{n}"
+            for t in tasks[n]:
+                r.rpush(q, json.dumps(t))
+                total += 1
+        print(f"enqueued {total} tasks: " + ", ".join(f"{n}={len(tasks[n])}" for n in nodes))
+    else:
+        # Dribble mode: small batches, refresh backlog (LLEN) between batches over the offline plan
+        global_list = []
+        for n in nodes:
+            for t in tasks[n]:
+                global_list.append((n, t))
+        idx = 0
+        total = 0
+        while idx < len(global_list):
+            backlog = {n: int(r.llen(f"q:{n}")) for n in nodes}
+            sent = 0
+            while sent < args.batch_size and idx < len(global_list):
+                n, t = global_list[idx]
+                if backlog.get(n, 0) < args.backlog_limit:
+                    r.rpush(f"q:{n}", json.dumps(t))
+                    backlog[n] = backlog.get(n, 0) + 1
+                    total += 1
+                    sent += 1
+                idx += 1
+            print(f"[drip] enqueued batch={sent}, total={total}, backlog=" + ", ".join(f"{k}:{backlog[k]}" for k in nodes))
+            if idx < len(global_list):
+                time.sleep(max(0.0, args.dribble_interval))
+        print(f"[drip] done, total enqueued={total}")
 
 if __name__ == "__main__":
     main()
