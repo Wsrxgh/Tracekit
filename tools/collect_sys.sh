@@ -150,7 +150,11 @@ start_procmon() {
   [ $INTERVAL_SEC -lt 1 ] && INTERVAL_SEC=1
 
   local MODE="container"
-  if ! command -v docker >/dev/null 2>&1 || ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
+  # Use container mode only if Docker is available AND the target container exists AND is running
+  if command -v docker >/dev/null 2>&1; then
+    local RUNNING=$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || echo false)
+    if [ "$RUNNING" != "true" ]; then MODE="host"; fi
+  else
     MODE="host"
   fi
 
