@@ -60,11 +60,21 @@ The framework generates standardized traces in `logs/$RUN_ID/cctf/`:
 
 ## OpenDC Integration
 
-Collected traces can be converted to OpenDC format for datacenter simulation:
-- **Tasks**: Derived from `invocations.jsonl` (task boundaries, resource requirements)
-- **Fragments**: Generated from `proc_cpu.jsonl` (fine-grained resource usage over time)
+Convert collected traces to OpenDC format for datacenter simulation:
 
-See `docs/README.md` for detailed format specifications and conversion guidelines.
+```bash
+# Export traces to OpenDC format
+python3 tools/export_opendc.py --input logs/YOUR_RUN_ID --output opendc_traces/
+
+# Verify the exported files
+python3 tools/verify_opendc.py --input opendc_traces/
+```
+
+Generated files:
+- **`tasks.parquet`**: Task-level information (submission time, duration, CPU/memory requirements)
+- **`fragments.parquet`**: Fine-grained resource usage over time
+
+See `docs/README.md` for detailed format specifications.
 
 ## Documentation
 

@@ -32,6 +32,8 @@ coverage.xml
 logs/
 output/
 outputs/
+opendc_traces/
+opendc_output*/
 *.db
 *.bin
 *.gz
@@ -47,3 +49,6 @@ body.bin
 *.tmp
 *.bak
 *~
+check_*.py
+verify_*.py
+full_flow_*.py

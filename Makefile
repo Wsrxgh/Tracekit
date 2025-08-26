@@ -75,6 +75,11 @@ parse:
 
 baseline: setup build run start-collect load stop-collect parse
 
+export-opendc:
+	@python3 tools/export_opendc.py --input logs/$(RUN_ID) --output opendc_traces/
+	@echo "OpenDC traces exported to opendc_traces/"
+	@python3 tools/verify_opendc.py --input opendc_traces/
+
 stop:
 	-docker rm -f svc >/dev/null 2>&1 || true
 	@RUN_ID=$(RUN_ID) bash tools/collect_sys.sh stop || true
