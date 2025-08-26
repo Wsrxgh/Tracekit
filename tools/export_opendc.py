@@ -81,12 +81,15 @@ def calculate_cpu_requirements(invocation, node_meta, proc_cpu_data):
         # Fallback: assume single core, moderate usage
         return 1, node_meta['cpu_freq_mhz'] * 0.5
 
-    # Calculate peak CPU usage to determine core count
-    peak_cpu_ms_per_second = max(sample['cpu_ms'] for sample in task_cpu_samples)
+    # Calculate peak core usage using actual dt if available
+    def sample_cores(s):
+        dt = s.get('dt_ms', 1000)
+        dt = max(dt, 1)
+        return s['cpu_ms'] / dt
+    peak_cores = max(sample_cores(s) for s in task_cpu_samples)
 
-    # Determine how many cores were actually used
-    # 1000ms/s = 1 full core, >1000ms/s = multiple cores
-    cores_used = max(1, int(peak_cpu_ms_per_second / 1000) + (1 if peak_cpu_ms_per_second % 1000 > 500 else 0))
+    # Determine how many cores were actually used (round to nearest, clamp to available cores)
+    cores_used = max(1, int(peak_cores + 0.5))
     cores_used = min(cores_used, node_meta['cpu_cores'])  # Can't exceed available cores
 
     # Calculate total CPU time used during task execution
@@ -229,24 +232,24 @@ def generate_fragments(all_node_data, tasks_df):
             task_cpu_samples.sort(key=lambda x: x['ts_ms'])
 
             for i, sample in enumerate(task_cpu_samples):
-                # Calculate duration (sampling interval)
-                if i < len(task_cpu_samples) - 1:
-                    duration = task_cpu_samples[i + 1]['ts_ms'] - sample['ts_ms']
-                else:
-                    duration = min(1000, task_end - sample['ts_ms'])  # Until task end or 1s
+                # Skip first sample as it has no previous sample to calculate interval from
+                if i == 0:
+                    continue
+
+                # Calculate duration: prefer dt_ms from parse phase; fallback to ts diff
+                prev_sample = task_cpu_samples[i - 1]
+                duration = int(sample.get('dt_ms', sample['ts_ms'] - prev_sample['ts_ms']))
 
                 if duration <= 0:
                     continue
 
-                # Calculate CPU usage: average CPU demand during this fragment
-                # cpu_ms is the CPU time used in this duration
-                # Convert to equivalent cores, then to average MHz demand
-                cores_used = sample['cpu_ms'] / duration  # equivalent cores
-                avg_mhz_demand = cores_used * node_meta['cpu_freq_mhz']  # average MHz demand
+                # Calculate CPU usage using actual interval
+                cores_used = sample['cpu_ms'] / duration
+                avg_mhz_demand = cores_used * node_meta['cpu_freq_mhz']
 
                 fragment = {
                     'id': task_id,
-                    'duration': duration,  # milliseconds
+                    'duration': duration,  # milliseconds (from prev_sample to current sample)
                     'cpu_usage': max(avg_mhz_demand, 0.1)  # Average MHz demand during this fragment
                 }
                 fragments.append(fragment)

@@ -148,7 +148,7 @@ if proc_metrics.exists():
         CLK_TCK = 100
     proc_cpu_out = cctf_dir / "proc_cpu.jsonl"
     proc_rss_out = cctf_dir / "proc_rss.jsonl"
-    last = {}
+    last = {}  # key: pid -> (utime, stime, timestamp)
     with open(proc_cpu_out, "w", encoding="utf-8") as cpu_out, open(proc_rss_out, "w", encoding="utf-8") as rss_out:
         for line in open(proc_metrics, "r", encoding="utf-8", errors="ignore"):
             try:
@@ -164,11 +164,21 @@ if proc_metrics.exists():
                 key = pid
                 prev = last.get(key)
                 if prev and isinstance(ut, int) and isinstance(st, int):
-                    dt_ticks = max(0, (ut+st) - (prev[0]+prev[1]))
-                    cpu_ms = int(dt_ticks * 1000 / max(1, CLK_TCK))
-                    cpu_out.write(json.dumps({"ts_ms": ts, "pid": pid, "cpu_ms": cpu_ms})+"\n")
-                if isinstance(ut, int) and isinstance(st, int):
-                    last[key] = (ut, st)
+                    prev_ut, prev_st, prev_ts = prev
+                    # Only calculate CPU usage if timestamp is different (avoid duplicate timestamp issues)
+                    if ts != prev_ts:
+                        dt_ticks = max(0, (ut+st) - (prev_ut+prev_st))
+                        cpu_ms = int(dt_ticks * 1000 / max(1, CLK_TCK))
+                        dt_ms  = max(0, ts - prev_ts)
+                        cpu_out.write(json.dumps({"ts_ms": ts, "pid": pid, "cpu_ms": cpu_ms, "dt_ms": dt_ms})+"\n")
+                        # Update last only when we successfully process a different timestamp
+                        last[key] = (ut, st, ts)
+                    # If same timestamp, keep the latest values but don't calculate CPU usage
+                    elif ut + st > prev_ut + prev_st:
+                        last[key] = (ut, st, ts)
+                elif isinstance(ut, int) and isinstance(st, int):
+                    # First sample for this PID
+                    last[key] = (ut, st, ts)
     print(f"[parse] copied proc_metrics and derived proc_cpu/proc_rss → {cctf_dir}")
 
 # ---------- 7) 复制/汇总新增制品（placement 与 system_stats） ----------
