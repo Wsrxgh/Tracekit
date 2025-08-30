@@ -145,9 +145,12 @@ stop_collectors() {
 # --- per-PID sampler: RSS + utime/stime (container if available; else host fallback) ---
 start_procmon() {
   local OUT="$LOG_DIR/proc_metrics.jsonl"
-  local INTERVAL_MS=${PROC_INTERVAL_MS:-1000}
+  local INTERVAL_MS=${PROC_INTERVAL_MS:-200}
+  # fractional seconds sleep for sub-second intervals
+  local INTERVAL_S=$(awk -v ms="$INTERVAL_MS" 'BEGIN{ printf("%.3f", ms/1000.0) }')
+  # legacy integer seconds (guard only)
   local INTERVAL_SEC=$(( (INTERVAL_MS + 500) / 1000 ))
-  [ $INTERVAL_SEC -lt 1 ] && INTERVAL_SEC=1
+  [ "$INTERVAL_SEC" -lt 1 ] && INTERVAL_SEC=1
 
   local MODE="container"
   # Use container mode only if Docker is available AND the target container exists AND is running
@@ -163,12 +166,12 @@ start_procmon() {
     local PIDS=$(docker exec -e PROC_MATCH="${PROC_MATCH}" "$CONTAINER" sh -lc '
 PIDS=""; for p in /proc/[0-9]*; do bn=${p##*/}; f="/proc/$bn/comm"; [ -r "$f" ] || continue; c=$(cat "$f"); echo "$c" | grep -Eiq "$PROC_MATCH" || continue; PIDS="$PIDS $bn"; done; echo ${PIDS# }' 2>/dev/null || true)
     [ -z "$PIDS" ] && PIDS="1"
-    local INNER_STATIC='TS=$(( $(date +%s) * 1000 + 10#$(date +%N | cut -c1-3) )); for pid in '$PIDS'; do if [ -r /proc/$pid/stat ]; then LINE=$(cat /proc/$pid/stat 2>/dev/null) || continue; REST=${LINE#*) }; set -- $REST; UT=${12}; ST=${13}; RSS=$( (grep -m1 "Rss:" /proc/$pid/smaps_rollup 2>/dev/null | tr -s " " | cut -d" " -f2) || true ); if [ -z "$RSS" ]; then PAGES=$(cut -d" " -f2 /proc/$pid/statm 2>/dev/null) && RSS=$(( ${PAGES:-0} * 4 )); fi; TH=$(awk '\''/^Threads:/{print $2}'\'' /proc/$pid/status 2>/dev/null || echo 0); printf "{\"ts_ms\":%s,\"pid\":%s,\"rss_kb\":%s,\"utime\":%s,\"stime\":%s,\"threads\":%s}\n" "$TS" "$pid" "${RSS:-0}" "${UT:-0}" "${ST:-0}" "${TH:-0}"; fi; done'
-    local INNER_REFRESH='TS=$(( $(date +%s) * 1000 + 10#$(date +%N | cut -c1-3) )); PIDS=$(for p in /proc/[0-9]*; do bn=${p##*/}; f="/proc/$bn/comm"; [ -r "$f" ] || continue; c=$(cat "$f"); echo "$c" | grep -Eiq "$PROC_MATCH" || continue; echo -n "$bn "; done); for pid in $PIDS; do if [ -r /proc/$pid/stat ]; then LINE=$(cat /proc/$pid/stat 2>/dev/null) || continue; REST=${LINE#*) }; set -- $REST; UT=${12}; ST=${13}; RSS=$( (grep -m1 "Rss:" /proc/$pid/smaps_rollup 2>/dev/null | tr -s " " | cut -d" " -f2) || true ); if [ -z "$RSS" ]; then PAGES=$(cut -d" " -f2 /proc/$pid/statm 2>/dev/null) && RSS=$(( ${PAGES:-0} * 4 )); fi; printf "{\"ts_ms\":%s,\"pid\":%s,\"rss_kb\":%s,\"utime\":%s,\"stime\":%s}\n" "$TS" "$pid" "${RSS:-0}" "${UT:-0}" "${ST:-0}"; fi; done'
+    local INNER_STATIC='TS=$(( $(date +%s) * 1000 + 10#$(date +%N | cut -c1-3)  )); for pid in '$PIDS'; do if [ -r /proc/$pid/stat ]; then LINE=$(cat /proc/$pid/stat 2>/dev/null) || continue; REST=${LINE#*) }; set -- $REST; UT=${12}; ST=${13}; PAGES=$(cut -d" " -f2 /proc/$pid/statm 2>/dev/null); RSS=$(( ${PAGES:-0} * 4 )); TH=$(awk '\''/^Threads:/{print $2}'\'' /proc/$pid/status 2>/dev/null || echo 0); printf "{\"ts_ms\":%s,\"pid\":%s,\"rss_kb\":%s,\"utime\":%s,\"stime\":%s,\"threads\":%s}\n" "$TS" "$pid" "${RSS:-0}" "${UT:-0}" "${ST:-0}" "${TH:-0}"; fi; done'
+    local INNER_REFRESH='TS=$(( $(date +%s) * 1000 + 10#$(date +%N | cut -c1-3) )); PIDS=$(for p in /proc/[0-9]*; do bn=${p##*/}; f="/proc/$bn/comm"; [ -r "$f" ] || continue; c=$(cat "$f"); echo "$c" | grep -Eiq "$PROC_MATCH" || continue; echo -n "$bn "; done); for pid in $PIDS; do if [ -r /proc/$pid/stat ]; then LINE=$(cat /proc/$pid/stat 2>/dev/null) || continue; REST=${LINE#*) }; set -- $REST; UT=${12}; ST=${13}; PAGES=$(cut -d" " -f2 /proc/$pid/statm 2>/dev/null); RSS=$(( ${PAGES:-0} * 4 )); printf "{\"ts_ms\":%s,\"pid\":%s,\"rss_kb\":%s,\"utime\":%s,\"stime\":%s}\n" "$TS" "$pid" "${RSS:-0}" "${UT:-0}" "${ST:-0}"; fi; done'
     if [ "${PROC_REFRESH}" = "1" ]; then
-      nohup bash -c "while :; do docker exec -e PROC_MATCH='$PROC_MATCH' '$CONTAINER' sh -lc '$INNER_REFRESH' >> '$OUT' 2>>'$LOG_DIR/procmon.err'; sleep $INTERVAL_SEC; done" >/dev/null 2>&1 &
+      nohup bash -c "while :; do docker exec -e PROC_MATCH='$PROC_MATCH' '$CONTAINER' sh -lc '$INNER_REFRESH' >> '$OUT' 2>>'$LOG_DIR/procmon.err'; sleep $INTERVAL_S; done" >/dev/null 2>&1 &
     else
-      nohup bash -c "while :; do docker exec '$CONTAINER' sh -lc '$INNER_STATIC' >> '$OUT' 2>>'$LOG_DIR/procmon.err'; sleep $INTERVAL_SEC; done" >/dev/null 2>&1 &
+      nohup bash -c "while :; do docker exec '$CONTAINER' sh -lc '$INNER_STATIC' >> '$OUT' 2>>'$LOG_DIR/procmon.err'; sleep $INTERVAL_S; done" >/dev/null 2>&1 &
     fi
     echo $! > "$LOG_DIR/procmon.pid"
     echo "proc sampler started (mode=container, container=$CONTAINER, interval=${INTERVAL_SEC}s) → $OUT"
@@ -176,12 +179,12 @@ PIDS=""; for p in /proc/[0-9]*; do bn=${p##*/}; f="/proc/$bn/comm"; [ -r "$f" ] 
     # host fallback: sample matching PIDs on the host
     local PIDS_HOST=$(for p in /proc/[0-9]*; do bn=${p##*/}; f="/proc/$bn/comm"; [ -r "$f" ] || continue; c=$(cat "$f"); echo "$c" | grep -Eiq "$PROC_MATCH" || continue; echo -n "$bn "; done)
     [ -z "$PIDS_HOST" ] && PIDS_HOST="1"
-    local H_STATIC='TS=$(( $(date +%s) * 1000 + 10#$(date +%N | cut -c1-3) )); for pid in '$PIDS_HOST'; do if [ -r /proc/$pid/stat ]; then LINE=$(cat /proc/$pid/stat 2>/dev/null) || continue; REST=${LINE#*) }; set -- $REST; UT=${12}; ST=${13}; RSS=$( (grep -m1 "Rss:" /proc/$pid/smaps_rollup 2>/dev/null | tr -s " " | cut -d" " -f2) || true ); if [ -z "$RSS" ]; then PAGES=$(cut -d" " -f2 /proc/$pid/statm 2>/dev/null) && RSS=$(( ${PAGES:-0} * 4 )); fi; TH=$(awk '\''/^Threads:/{print $2}'\'' /proc/$pid/status 2>/dev/null || echo 0); printf "{\"ts_ms\":%s,\"pid\":%s,\"rss_kb\":%s,\"utime\":%s,\"stime\":%s,\"threads\":%s}\n" "$TS" "$pid" "${RSS:-0}" "${UT:-0}" "${ST:-0}" "${TH:-0}"; fi; done'
-    local H_REFRESH='TS=$(( $(date +%s) * 1000 + 10#$(date +%N | cut -c1-3) )); PIDS=$(for p in /proc/[0-9]*; do bn=${p##*/}; f="/proc/$bn/comm"; [ -r "$f" ] || continue; c=$(cat "$f"); echo "$c" | grep -Eiq "$PROC_MATCH" || continue; echo -n "$bn "; done); for pid in $PIDS; do if [ -r /proc/$pid/stat ]; then LINE=$(cat /proc/$pid/stat 2>/dev/null) || continue; REST=${LINE#*) }; set -- $REST; UT=${12}; ST=${13}; RSS=$( (grep -m1 "Rss:" /proc/$pid/smaps_rollup 2>/dev/null | tr -s " " | cut -d" " -f2) || true ); if [ -z "$RSS" ]; then PAGES=$(cut -d" " -f2 /proc/$pid/statm 2>/dev/null) && RSS=$(( ${PAGES:-0} * 4 )); fi; printf "{\"ts_ms\":%s,\"pid\":%s,\"rss_kb\":%s,\"utime\":%s,\"stime\":%s}\n" "$TS" "$pid" "${RSS:-0}" "${UT:-0}" "${ST:-0}"; fi; done'
+    local H_STATIC='TS=$(( $(date +%s) * 1000 + 10#$(date +%N | cut -c1-3) )); for pid in '$PIDS_HOST'; do if [ -r /proc/$pid/stat ]; then LINE=$(cat /proc/$pid/stat 2>/dev/null) || continue; REST=${LINE#*) }; set -- $REST; UT=${12}; ST=${13}; PAGES=$(cut -d" " -f2 /proc/$pid/statm 2>/dev/null); RSS=$(( ${PAGES:-0} * 4 )); TH=$(awk '\''/^Threads:/{print $2}'\'' /proc/$pid/status 2>/dev/null || echo 0); printf "{\"ts_ms\":%s,\"pid\":%s,\"rss_kb\":%s,\"utime\":%s,\"stime\":%s,\"threads\":%s}\n" "$TS" "$pid" "${RSS:-0}" "${UT:-0}" "${ST:-0}" "${TH:-0}"; fi; done'
+    local H_REFRESH='TS=$(( $(date +%s) * 1000 + 10#$(date +%N | cut -c1-3) )); PIDS=$(for p in /proc/[0-9]*; do bn=${p##*/}; f="/proc/$bn/comm"; [ -r "$f" ] || continue; c=$(cat "$f"); echo "$c" | grep -Eiq "$PROC_MATCH" || continue; echo -n "$bn "; done); for pid in $PIDS; do if [ -r /proc/$pid/stat ]; then LINE=$(cat /proc/$pid/stat 2>/dev/null) || continue; REST=${LINE#*) }; set -- $REST; UT=${12}; ST=${13}; PAGES=$(cut -d" " -f2 /proc/$pid/statm 2>/dev/null); RSS=$(( ${PAGES:-0} * 4 )); printf "{\"ts_ms\":%s,\"pid\":%s,\"rss_kb\":%s,\"utime\":%s,\"stime\":%s}\n" "$TS" "$pid" "${RSS:-0}" "${UT:-0}" "${ST:-0}"; fi; done'
     if [ "${PROC_REFRESH}" = "1" ]; then
-      nohup bash -c "while :; do PROC_MATCH='$PROC_MATCH' bash -lc '$H_REFRESH' >> '$OUT' 2>>'$LOG_DIR/procmon.err'; sleep $INTERVAL_SEC; done" >/dev/null 2>&1 &
+      nohup bash -c "while :; do PROC_MATCH='$PROC_MATCH' bash -lc '$H_REFRESH' >> '$OUT' 2>>'$LOG_DIR/procmon.err'; sleep $INTERVAL_S; done" >/dev/null 2>&1 &
     else
-      nohup bash -c "while :; do bash -lc '$H_STATIC' >> '$OUT' 2>>'$LOG_DIR/procmon.err'; sleep $INTERVAL_SEC; done" >/dev/null 2>&1 &
+      nohup bash -c "while :; do bash -lc '$H_STATIC' >> '$OUT' 2>>'$LOG_DIR/procmon.err'; sleep $INTERVAL_S; done" >/dev/null 2>&1 &
     fi
     echo $! > "$LOG_DIR/procmon.pid"
     echo "proc sampler started (mode=host, match='$PROC_MATCH', interval=${INTERVAL_SEC}s) → $OUT"

@@ -51,8 +51,10 @@ make parse RUN_ID=test001 NODE_ID=cloud1 STAGE=cloud
 
 ---
 
-## End-to-end multi-node trace collection test
-This section documents the exact steps we use in production-like tests with a controller node (cloud0) and two workers (cloud1, cloud2). It assumes Redis runs on cloud0 and both workers share the same repo layout.
+## End-to-end multi-node trace collection test (current private test flow)
+This section documents the exact steps currently used for my private tests with a controller node (cloud0) and two workers (cloud1, cloud2). Redis runs on cloud0 and REQUIRES PASSWORD. All nodes share the same repo layout.
+
+Important: Redis requires auth. Always use URLs like `redis://:Wsr123@HOST:6379/0`.
 
 1) Generate and distribute a RUN_ID (cloud0)
 ```bash
@@ -63,20 +65,18 @@ scp run_id.env <cloud2_user>@192.168.133.4:~/Tracekit/
 ```
 
 2) Start collectors on workers (cloud1 & cloud2)
-- Always source run_id.env on each worker.
+- Always `source run_id.env` on each worker.
 - Only match ffmpeg/ffprobe to avoid noise; refresh PID set every tick.
 ```bash
 # cloud1
 cd ~/Tracekit && source run_id.env
-PROC_SAMPLING=1 PROC_REFRESH=1 PROC_MATCH='^ffmpeg$|^ffprobe$' \
-make start-collect RUN_ID=$RUN_ID NODE_ID=cloud1 STAGE=cloud VM_IP=192.168.133.2
+PROC_SAMPLING=1 PROC_REFRESH=1 PROC_MATCH='^ffmpeg$|^ffprobe$' make start-collect RUN_ID=$RUN_ID NODE_ID=cloud1 STAGE=cloud VM_IP=192.168.133.2
 
 # cloud2
 cd ~/Tracekit && source run_id.env
-PROC_SAMPLING=1 PROC_REFRESH=1 PROC_MATCH='^ffmpeg$|^ffprobe$' \
-make start-collect RUN_ID=$RUN_ID NODE_ID=cloud2 STAGE=cloud VM_IP=192.168.133.2
+PROC_SAMPLING=1 PROC_REFRESH=1 PROC_MATCH='^ffmpeg$|^ffprobe$' make start-collect RUN_ID=$RUN_ID NODE_ID=cloud2 STAGE=cloud VM_IP=192.168.133.2
 ```
-Expected log line on each worker:
+Expected on each worker:
 ```
 proc sampler started (mode=host, match='^ffmpeg$|^ffprobe$', interval=1s) → logs/$RUN_ID/proc_metrics.jsonl
 ```
@@ -88,55 +88,69 @@ proc sampler started (mode=host, match='^ffmpeg$|^ffprobe$', interval=1s) → lo
 cd ~/Tracekit && source run_id.env
 NODE_ID=cloud1 RUN_ID=$RUN_ID python3 tools/scheduler/worker.py \
   --outputs outputs --parallel 1 \
-  --redis redis://:Wsr123@192.168.133.2:6379/0
+  --redis "redis://:Wsr123@192.168.133.2:6379/0"
 
 # cloud2
 cd ~/Tracekit && source run_id.env
 NODE_ID=cloud2 RUN_ID=$RUN_ID python3 tools/scheduler/worker.py \
   --outputs outputs --parallel 1 \
-  --redis redis://:Wsr123@192.168.133.2:6379/0
+  --redis "redis://:Wsr123@192.168.133.2:6379/0"
 ```
-New events include pid/input/output/trace_id, e.g. tail -n 1 logs/$RUN_ID/events.ffmpeg.jsonl.
 
-4) Dribble tasks from controller (cloud0)
+4) Start central scheduler on controller (cloud0)
+- Foreground (block terminal):
+```bash
+cd ~/Tracekit
+python3 tools/scheduler/scheduler_central.py --redis "redis://:Wsr123@127.0.0.1:6379/0"
+```
+- Or background (recommended):
+```bash
+cd ~/Tracekit
+nohup python3 tools/scheduler/scheduler_central.py --redis "redis://:Wsr123@127.0.0.1:6379/0" > logs/scheduler_central.log 2>&1 &
+```
+
+5) Dribble tasks from controller into global pending (FIFO)
+- Inputs are under `inputs/ffmpeg` on cloud0. Ensure workers can access the same paths (sync if no shared storage).
+- Pending queue limit is 6; submission interval defaults to 100ms; submission_time (ts_enqueue) is strictly increasing.
 ```bash
 cd ~/Tracekit
 python3 tools/scheduler/dispatcher.py \
-  --inputs inputs/ffmpeg --outputs outputs \
-  --scale 1280:720 --preset veryfast --crf 28 \
-  --nodes cloud1,cloud2 --policy duration-online \
-  --batch-size 1 --dribble-interval 1.0 --backlog-limit 1 \
-  --redis redis://:Wsr123@localhost:6379/0
+  --inputs inputs/ffmpeg \
+  --outputs outputs \
+  --policy rr3 \
+  --pending \
+  --pending-max 6 \
+  --batch-size 1 \
+  --dribble-interval 0.1 \
+  --redis "redis://:Wsr123@127.0.0.1:6379/0"
 ```
 
-5) Stop collectors and parse (workers)
-- After queues are empty on cloud0 (LLEN q:cloud1/q:cloud2 = 0):
+6) Stop collectors and parse (workers) after queues are empty
+- Check on cloud0 `LLEN q:pending`, `LLEN q:cloud1`, `LLEN q:cloud2` are all 0.
 ```bash
-# on each worker
+# cloud1
 cd ~/Tracekit && source run_id.env
 make stop-collect RUN_ID=$RUN_ID
-make parse RUN_ID=$RUN_ID NODE_ID=$(hostname) STAGE=cloud
-```
-Outputs under logs/$RUN_ID/cctf/:
-- invocations.jsonl (merged events)
-- proc_metrics.jsonl, proc_cpu.jsonl, proc_rss.jsonl
-- host_metrics.jsonl, link_metrics.jsonl, nodes.json, links.json
+make parse RUN_ID=$RUN_ID NODE_ID=cloud1 STAGE=cloud
 
-6) Optional: migrate earlier events into current RUN_ID
-If you previously forgot to pass RUN_ID to workers and have events under timestamped log dirs, merge them:
-```bash
+# cloud2
 cd ~/Tracekit && source run_id.env
-for d in logs/20*Z; do
-  [ "$(basename "$d")" = "$RUN_ID" ] && continue
-  [ -f "$d/events.ffmpeg.jsonl" ] && cat "$d/events.ffmpeg.jsonl" >> "logs/$RUN_ID/events.ffmpeg.migrated.jsonl"
-done
-make parse RUN_ID=$RUN_ID NODE_ID=$(hostname) STAGE=cloud
+make stop-collect RUN_ID=$RUN_ID
+make parse RUN_ID=$RUN_ID NODE_ID=cloud2 STAGE=cloud
+```
+Artifacts under logs/$RUN_ID/cctf/: invocations.jsonl, proc_cpu.jsonl, proc_rss.jsonl, etc.
+
+7) Export to OpenDC (cloud0, optional)
+```bash
+cd ~/Tracekit
+python3 tools/export_opendc.py --input logs/$RUN_ID --output opendc_traces_$RUN_ID
 ```
 
-Troubleshooting
-- invocations.jsonl is empty → ensure logs/$RUN_ID contains events.*.jsonl and parse with RUN_ID
-- proc_metrics.jsonl empty → ensure startup log shows mode=host and match='^ffmpeg$|^ffprobe$'; verify ffmpeg running while sampling
-- Events missing pid → update to latest, restart workers with RUN_ID=$RUN_ID
+Troubleshooting (private flow)
+- `Authentication required` → Ensure Redis URL includes password `redis://:Wsr123@HOST:6379/0`.
+- `Connection refused` on workers → On cloud0, Redis must listen on 0.0.0.0 and open 6379; then restart. Also verify URL is not defaulting to localhost.
+- Dispatcher multiline commands must use `\` for line continuation; otherwise each `--flag` is treated as a separate command.
+- If outputs/ already contains target files, ffmpeg may prompt; clean with `rm -rf outputs/*` on workers before tests.
 
 ## Output
 
