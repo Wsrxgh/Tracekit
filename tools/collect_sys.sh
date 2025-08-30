@@ -126,19 +126,28 @@ link_meta() {
 # ---- helpers: stop previous collectors in this LOG_DIR (TERM -> wait -> KILL) ----
 stop_collectors() {
   local did=0
+  # 1) Try to stop by recorded PIDs (and their process groups)
   for name in mpstat ifstat vmstat procmon; do
     local pf="$LOG_DIR/${name}.pid"
     if [ -f "$pf" ]; then
       local PID=$(cat "$pf" 2>/dev/null || echo "")
       if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        # send TERM to the process and its group to ensure children (e.g., mpstat/ifstat/vmstat) also exit
         kill "$PID" 2>/dev/null || true
+        kill -TERM -"$PID" 2>/dev/null || true
         sleep 0.5
+        # force kill if still alive
         kill -0 "$PID" 2>/dev/null && kill -9 "$PID" 2>/dev/null || true
+        kill -KILL -"$PID" 2>/dev/null || true
         did=1
       fi
       rm -f "$pf" 2>/dev/null || true
     fi
   done
+  # 2) Fallback: kill by log file path (handles cases where wrapper died but child remains)
+  pkill -f "$LOG_DIR/cpu.log" 2>/dev/null || true
+  pkill -f "$LOG_DIR/net.log" 2>/dev/null || true
+  pkill -f "$LOG_DIR/mem.log" 2>/dev/null || true
   [ $did -eq 1 ] && echo "previous collectors stopped in $LOG_DIR" || true
 }
 
@@ -166,8 +175,8 @@ start_procmon() {
     local PIDS=$(docker exec -e PROC_MATCH="${PROC_MATCH}" "$CONTAINER" sh -lc '
 PIDS=""; for p in /proc/[0-9]*; do bn=${p##*/}; f="/proc/$bn/comm"; [ -r "$f" ] || continue; c=$(cat "$f"); echo "$c" | grep -Eiq "$PROC_MATCH" || continue; PIDS="$PIDS $bn"; done; echo ${PIDS# }' 2>/dev/null || true)
     [ -z "$PIDS" ] && PIDS="1"
-    local INNER_STATIC='TS=$(( $(date +%s) * 1000 + 10#$(date +%N | cut -c1-3)  )); for pid in '$PIDS'; do if [ -r /proc/$pid/stat ]; then LINE=$(cat /proc/$pid/stat 2>/dev/null) || continue; REST=${LINE#*) }; set -- $REST; UT=${12}; ST=${13}; PAGES=$(cut -d" " -f2 /proc/$pid/statm 2>/dev/null); RSS=$(( ${PAGES:-0} * 4  )); if [ "${PROC_THREADS:-0}" = "1" ]; then TH=$(awk '\''/^Threads:/{print $2}'\'' /proc/$pid/status 2>/dev/null || echo 0); printf "{\"ts_ms\":%s,\"pid\":%s,\"rss_kb\":%s,\"utime\":%s,\"stime\":%s,\"threads\":%s}\n" "$TS" "$pid" "${RSS:-0}" "${UT:-0}" "${ST:-0}" "${TH:-0}"; else printf "{\"ts_ms\":%s,\"pid\":%s,\"rss_kb\":%s,\"utime\":%s,\"stime\":%s}\n" "$TS" "$pid" "${RSS:-0}" "${UT:-0}" "${ST:-0}"; fi; fi; done'
-    local INNER_REFRESH='TS=$(( $(date +%s) * 1000 + 10#$(date +%N | cut -c1-3) )); PIDS=$(for p in /proc/[0-9]*; do bn=${p##*/}; f="/proc/$bn/comm"; [ -r "$f" ] || continue; c=$(cat "$f"); echo "$c" | grep -Eiq "$PROC_MATCH" || continue; echo -n "$bn "; done); for pid in $PIDS; do if [ -r /proc/$pid/stat ]; then LINE=$(cat /proc/$pid/stat 2>/dev/null) || continue; REST=${LINE#*) }; set -- $REST; UT=${12}; ST=${13}; PAGES=$(cut -d" " -f2 /proc/$pid/statm 2>/dev/null); RSS=$(( ${PAGES:-0} * 4 )); if [ "${PROC_THREADS:-0}" = "1" ]; then TH=$(awk '\''/^Threads:/{print $2}'\'' /proc/$pid/status 2>/dev/null || echo 0); printf "{\"ts_ms\":%s,\"pid\":%s,\"rss_kb\":%s,\"utime\":%s,\"stime\":%s,\"threads\":%s}\n" "$TS" "$pid" "${RSS:-0}" "${UT:-0}" "${ST:-0}" "${TH:-0}"; else printf "{\"ts_ms\":%s,\"pid\":%s,\"rss_kb\":%s,\"utime\":%s,\"stime\":%s}\n" "$TS" "$pid" "${RSS:-0}" "${UT:-0}" "${ST:-0}"; fi; fi; done'
+    local INNER_STATIC='TS=$(( $(date +%s) * 1000 + 10#$(date +%N | cut -c1-3) )); for pid in '$PIDS'; do if [ -r /proc/$pid/stat ]; then LINE=$(cat /proc/$pid/stat 2>/dev/null) || continue; REST=${LINE#*) }; set -- $REST; UT=${12}; ST=${13}; PAGES=$(cut -d" " -f2 /proc/$pid/statm 2>/dev/null); RSS=$(( ${PAGES:-0} * 4 )); TH=0; if [ "${PROC_THREADS:-0}" = "1" ]; then TH=$(awk '\''/^Threads:/{print $2}'\'' /proc/$pid/status 2>/dev/null || echo 0); fi; printf "{\"ts_ms\":%s,\"pid\":%s,\"rss_kb\":%s,\"utime\":%s,\"stime\":%s,\"threads\":%s}\n" "$TS" "$pid" "${RSS:-0}" "${UT:-0}" "${ST:-0}" "${TH:-0}"; fi; done'
+    local INNER_REFRESH='TS=$(( $(date +%s) * 1000 + 10#$(date +%N | cut -c1-3) )); PIDS=$(for p in /proc/[0-9]*; do bn=${p##*/}; f="/proc/$bn/comm"; [ -r "$f" ] || continue; c=$(cat "$f"); echo "$c" | grep -Eiq "$PROC_MATCH" || continue; echo -n "$bn "; done); for pid in $PIDS; do if [ -r /proc/$pid/stat ]; then LINE=$(cat /proc/$pid/stat 2>/dev/null) || continue; REST=${LINE#*) }; set -- $REST; UT=${12}; ST=${13}; PAGES=$(cut -d" " -f2 /proc/$pid/statm 2>/dev/null); RSS=$(( ${PAGES:-0} * 4 )); TH=0; if [ "${PROC_THREADS:-0}" = "1" ]; then TH=$(awk '\''/^Threads:/{print $2}'\'' /proc/$pid/status 2>/dev/null || echo 0); fi; printf "{\"ts_ms\":%s,\"pid\":%s,\"rss_kb\":%s,\"utime\":%s,\"stime\":%s,\"threads\":%s}\n" "$TS" "$pid" "${RSS:-0}" "${UT:-0}" "${ST:-0}" "${TH:-0}"; fi; done'
     if [ "${PROC_REFRESH}" = "1" ]; then
       nohup bash -c "while :; do docker exec -e PROC_MATCH='$PROC_MATCH' '$CONTAINER' sh -lc '$INNER_REFRESH' >> '$OUT' 2>>'$LOG_DIR/procmon.err'; sleep $INTERVAL_S; done" >/dev/null 2>&1 &
     else
