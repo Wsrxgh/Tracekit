@@ -87,10 +87,13 @@ def main():
     ap.add_argument("--nodes", default=",".join(DEFAULT_NODES))
     ap.add_argument("--policy", default="rr3")
     ap.add_argument("--redis", default="redis://localhost:6379/0")
+    # Central pending mode (global FIFO) options
+    ap.add_argument("--pending", action="store_true", help="Enqueue to global pending queue q:pending for central scheduler")
+    ap.add_argument("--pending-max", type=int, default=6, help="Max length of q:pending; dribble when full")
     # Dribble mode options
     ap.add_argument("--drip", action="store_true", help="Enable dribble (small-batch) enqueue loop")
     ap.add_argument("--batch-size", type=int, default=1)
-    ap.add_argument("--dribble-interval", type=float, default=1.0)
+    ap.add_argument("--dribble-interval", type=float, default=0.1)
     ap.add_argument("--backlog-limit", type=int, default=1, help="Max queued tasks per node (approx by LLEN)")
     args = ap.parse_args()
 
@@ -165,6 +168,44 @@ def main():
 
     # enqueue
     r = redis.Redis.from_url(args.redis)
+
+    # Global pending mode: pack all tasks into a single list for FIFO
+    if args.pending:
+        # Flatten tasks list preserving original order (by file name)
+        global_list = []
+        for n in nodes:
+            for t in tasks[n]:
+                global_list.append(t)
+        # Dribble into q:pending with max length guard and unique submission_time spacing
+        idx = 0
+        total = 0
+        last_enq_ms = 0
+        while idx < len(global_list):
+            qlen = int(r.llen("q:pending"))
+            sent = 0
+            while sent < args.batch_size and idx < len(global_list):
+                if qlen >= args.pending_max:
+                    break
+                t = global_list[idx]
+                # set submission fields
+                now_ms = int(time.time() * 1000)
+                # ensure monotonic increasing submission times (avoid identical ms)
+                if now_ms <= last_enq_ms:
+                    now_ms = last_enq_ms + 1
+                last_enq_ms = now_ms
+                t["ts_enqueue"] = now_ms
+                r.rpush("q:pending", json.dumps(t))
+                qlen += 1
+                total += 1
+                sent += 1
+                idx += 1
+            if sent > 0:
+                print(f"[pending] enqueued batch={sent}, total={total}, qlen={qlen}")
+            if idx < len(global_list):
+                # dribble small sleep to spread submission_time while respecting pending_max
+                time.sleep(max(0.0, args.dribble_interval))
+        print(f"[pending] done, total enqueued={total}")
+        return
 
     if not args.drip:
         total = 0

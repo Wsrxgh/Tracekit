@@ -32,6 +32,12 @@ def run_task(task: dict, root: Path) -> int:
     # RUN_ID optional at this stage; wrapper will write events if present
     env.setdefault("NODE_ID", os.getenv("NODE_ID", "vm0"))
     env.setdefault("STAGE", os.getenv("STAGE", "cloud"))
+    # Pass submission time from dispatcher if present
+    if "ts_enqueue" in task:
+        try:
+            env["TS_ENQUEUE"] = str(int(task["ts_enqueue"]))
+        except Exception:
+            pass
     # RUN_ID passthrough if defined
     if os.getenv("RUN_ID"):
         env["RUN_ID"] = os.getenv("RUN_ID")
@@ -44,6 +50,7 @@ def main():
     ap.add_argument("--outputs", default="outputs")
     ap.add_argument("--redis", default="redis://localhost:6379/0")
     ap.add_argument("--parallel", type=int, default=1)
+    ap.add_argument("--slots-key", default="slots:available")
     args = ap.parse_args()
 
     node = os.getenv("NODE_ID", "vm0")
@@ -53,6 +60,14 @@ def main():
 
     root = Path(__file__).resolve().parents[2]
     print(f"Worker node={node} queue={qname} redis={args.redis} parallel={args.parallel}")
+
+    # Register available slots tokens according to parallel
+    try:
+        for _ in range(max(0, args.parallel)):
+            r.rpush(args.slots_key, node)
+        print(f"registered {args.parallel} slots for node={node} into {args.slots_key}")
+    except Exception as e:
+        print("failed to register slots:", e, file=sys.stderr)
 
     signal.signal(signal.SIGINT, handle_sigint)
 
@@ -85,6 +100,11 @@ def main():
                 else:
                     print(f"task ok: {t['input']} -> {t['output']}")
             finally:
+                # Return one slot token on completion
+                try:
+                    r.rpush(args.slots_key, node)
+                except Exception as e:
+                    print("failed to return slot:", e, file=sys.stderr)
                 task_q.task_done()
 
     fetch_t = threading.Thread(target=fetch_loop, daemon=True)

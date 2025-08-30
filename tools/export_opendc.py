@@ -14,6 +14,7 @@ import argparse
 import json
 import pandas as pd
 import numpy as np
+import math
 from pathlib import Path
 from collections import defaultdict
 import glob
@@ -21,12 +22,17 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 def load_node_data(log_dir):
-    """Load all trace data from a single node directory"""
+    """Load all trace data from a single node directory
+    Note on head-gap handling: We also load proc_metrics.jsonl to optionally
+    synthesize the very first fragment [ts_start, ts1) for apps where one task
+    equals one fresh PID (e.g., ffmpeg per-invocation). This is not suitable
+    for long-lived processes serving multiple tasks concurrently.
+    """
     node_dir = Path(log_dir)
-    
+
     # Load node metadata
     node_meta = json.load(open(node_dir / "node_meta.json"))
-    
+
     # Load invocations (tasks)
     invocations = []
     inv_file = node_dir / "cctf" / "invocations.jsonl"
@@ -35,8 +41,8 @@ def load_node_data(log_dir):
             for line in f:
                 if line.strip():
                     invocations.append(json.loads(line))
-    
-    # Load process CPU usage
+
+    # Load process CPU usage (diffed)
     proc_cpu = []
     cpu_file = node_dir / "cctf" / "proc_cpu.jsonl"
     if cpu_file.exists():
@@ -44,7 +50,19 @@ def load_node_data(log_dir):
             for line in f:
                 if line.strip():
                     proc_cpu.append(json.loads(line))
-    
+
+    # Load raw process snapshots (for head-gap synthesis)
+    proc_metrics = []
+    pm_file = node_dir / "cctf" / "proc_metrics.jsonl"
+    if pm_file.exists():
+        with open(pm_file) as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        proc_metrics.append(json.loads(line))
+                    except Exception:
+                        pass
+
     # Load process memory usage
     proc_rss = []
     rss_file = node_dir / "cctf" / "proc_rss.jsonl"
@@ -53,11 +71,12 @@ def load_node_data(log_dir):
             for line in f:
                 if line.strip():
                     proc_rss.append(json.loads(line))
-    
+
     return {
         'node_meta': node_meta,
         'invocations': invocations,
         'proc_cpu': proc_cpu,
+        'proc_metrics': proc_metrics,
         'proc_rss': proc_rss
     }
 
@@ -169,19 +188,29 @@ def generate_tasks(all_node_data):
     return tasks_df
 
 def generate_fragments(all_node_data, tasks_df):
-    """Generate OpenDC Fragments dataframe"""
+    """Generate OpenDC Fragments dataframe and per-task peak cpu_usage (MHz).
+    Returns (fragments_df, peak_by_task: dict[int,float], task_node_info: dict[int, dict]).
+    """
     fragments = []
+    peak_by_task = {}
+    task_node_info = {}
 
     # Create mapping from PID to task_id and task info
     pid_to_task_info = {}
     task_id = 1
 
     for node_name, node_data in all_node_data.items():
+        node_meta_local = node_data['node_meta']
         for inv in node_data['invocations']:
             pid_to_task_info[inv['pid']] = {
                 'task_id': task_id,
                 'task_start': inv['ts_start'],
                 'task_end': inv['ts_end']
+            }
+            # Record per-task node specs for later cpu_count recompute
+            task_node_info[task_id] = {
+                'cpu_freq_mhz': node_meta_local.get('cpu_freq_mhz'),
+                'cpu_cores': node_meta_local.get('cpu_cores'),
             }
             task_id += 1
 
@@ -189,11 +218,24 @@ def generate_fragments(all_node_data, tasks_df):
     for node_name, node_data in all_node_data.items():
         node_meta = node_data['node_meta']
         proc_cpu_data = node_data['proc_cpu']
+        proc_metrics = node_data.get('proc_metrics', [])
 
         # Group CPU samples by PID
         cpu_by_pid = defaultdict(list)
         for sample in proc_cpu_data:
             cpu_by_pid[sample['pid']].append(sample)
+
+        # Group proc_metrics first snapshots per PID (for head-gap synthesis)
+        first_snapshot = {}
+        if proc_metrics:
+            for snap in proc_metrics:
+                pid = snap.get('pid')
+                ts = snap.get('ts_ms')
+                if pid is None or ts is None:
+                    continue
+                # Keep the earliest snapshot per PID
+                if pid not in first_snapshot or ts < first_snapshot[pid]['ts_ms']:
+                    first_snapshot[pid] = snap
 
         for pid, cpu_samples in cpu_by_pid.items():
             if pid not in pid_to_task_info:
@@ -204,11 +246,14 @@ def generate_fragments(all_node_data, tasks_df):
             task_start = task_info['task_start']
             task_end = task_info['task_end']
 
-            # Filter samples to task execution window
+            # Filter samples to task execution window (by sample ts)
             task_cpu_samples = [
                 sample for sample in cpu_samples
                 if task_start <= sample['ts_ms'] <= task_end
             ]
+
+            # Optionally synthesize a head fragment later using the first proc_cpu interval
+            # (more conservative: uses the first observed cores and respects cpu_cores cap).
 
             if not task_cpu_samples:
                 # Generate synthetic fragment for tasks without CPU data
@@ -231,28 +276,50 @@ def generate_fragments(all_node_data, tasks_df):
             # Sort samples by timestamp
             task_cpu_samples.sort(key=lambda x: x['ts_ms'])
 
+            # Synthesize head fragment using first proc_cpu cores (clamped), covering [task_start, first_window_start)
+            first_sample = task_cpu_samples[0]
+            dt0 = int(first_sample.get('dt_ms', 0)) if first_sample.get('dt_ms') is not None else 0
+            if dt0 > 0:
+                first_ts = int(first_sample['ts_ms'])
+                first_win_start = first_ts - dt0
+                head_duration = max(0, first_win_start - task_start)
+                if head_duration > 0:
+                    first_cores = max(0.0, float(first_sample['cpu_ms']) / float(dt0))
+                    first_cores = min(first_cores, float(node_meta.get('cpu_cores', first_cores)))
+                    head_mhz = max(first_cores * node_meta['cpu_freq_mhz'], 0.1)
+                    fragments.append({'id': task_id, 'duration': int(head_duration), 'cpu_usage': float(head_mhz)})
+
+            # Then append fragments for each proc_cpu interval (clip first interval to its own window start)
             for i, sample in enumerate(task_cpu_samples):
-                # Skip first sample as it has no previous sample to calculate interval from
-                if i == 0:
-                    continue
+                dt = int(sample.get('dt_ms', 0)) if sample.get('dt_ms') is not None else 0
+                if dt <= 0:
+                    # Fallback to ts diff if available
+                    if i == 0:
+                        continue
+                    prev_sample = task_cpu_samples[i - 1]
+                    dt = int(sample['ts_ms'] - prev_sample['ts_ms'])
+                    if dt <= 0:
+                        continue
 
-                # Calculate duration: prefer dt_ms from parse phase; fallback to ts diff
-                prev_sample = task_cpu_samples[i - 1]
-                duration = int(sample.get('dt_ms', sample['ts_ms'] - prev_sample['ts_ms']))
-
+                win_start = sample['ts_ms'] - dt
+                # For the first interval, ensure we don't overlap the synthesized head fragment
+                clip_start = max(task_start, win_start)
+                duration = int(sample['ts_ms'] - clip_start)
                 if duration <= 0:
                     continue
+                # Proportionally adjust cpu_ms if clipped
+                cpu_ms_adj = sample['cpu_ms'] * (duration / dt) if duration != dt else sample['cpu_ms']
 
-                # Calculate CPU usage using actual interval
-                cores_used = sample['cpu_ms'] / duration
-                avg_mhz_demand = cores_used * node_meta['cpu_freq_mhz']
+                # Calculate CPU usage and clamp to available cores
+                cores_used = max(0.0, float(cpu_ms_adj) / float(duration))
+                cores_used = min(cores_used, float(node_meta.get('cpu_cores', cores_used)))
+                avg_mhz_demand = max(cores_used * node_meta['cpu_freq_mhz'], 0.1)
 
-                fragment = {
-                    'id': task_id,
-                    'duration': duration,  # milliseconds (from prev_sample to current sample)
-                    'cpu_usage': max(avg_mhz_demand, 0.1)  # Average MHz demand during this fragment
-                }
-                fragments.append(fragment)
+                fragments.append({'id': task_id, 'duration': int(duration), 'cpu_usage': float(avg_mhz_demand)})
+                # track peak per task
+                prev_peak = peak_by_task.get(task_id)
+                if prev_peak is None or avg_mhz_demand > prev_peak:
+                    peak_by_task[task_id] = float(avg_mhz_demand)
 
     # Ensure all tasks have at least one fragment
     tasks_with_fragments = set(f['id'] for f in fragments)
@@ -282,7 +349,7 @@ def generate_fragments(all_node_data, tasks_df):
     fragments_df['duration'] = fragments_df['duration'].astype('int64')  # INT64
     fragments_df['cpu_usage'] = fragments_df['cpu_usage'].astype('float64')  # DOUBLE (float64 = double)
 
-    return fragments_df
+    return fragments_df, peak_by_task, task_node_info
 
 def main():
     parser = argparse.ArgumentParser(description='Convert Tracekit traces to OpenDC format')
@@ -326,9 +393,30 @@ def main():
     
     # Generate Fragments
     print("Generating Fragments...")
-    fragments_df = generate_fragments(all_node_data, tasks_df)
+    fragments_df, _peak_by_task, task_node_info = generate_fragments(all_node_data, tasks_df)
     print(f"Generated {len(fragments_df)} fragments")
-    
+
+    # Recompute task cpu_capacity/cpu_count using fragments P95 of cpu_usage (MHz)
+    p95_series = fragments_df.groupby('id')['cpu_usage'].quantile(0.95)
+    tasks_df = tasks_df.merge(p95_series.rename('p95_mhz'), left_on='id', right_index=True, how='left')
+    # Update cpu_capacity to P95 (fallback to existing if missing)
+    tasks_df['cpu_capacity'] = tasks_df['p95_mhz'].fillna(tasks_df['cpu_capacity'])
+
+    # Derive cpu_count = ceil(cpu_capacity / node_freq_mhz), clamped to node cores
+    def _derive_count(row):
+        node_info = task_node_info.get(int(row['id']), {})
+        freq = float(node_info.get('cpu_freq_mhz') or np.nan)
+        cores = int(node_info.get('cpu_cores') or 0)
+        if not np.isfinite(freq) or freq <= 0:
+            return int(row['cpu_count'])
+        count = int(math.ceil(float(row['cpu_capacity']) / freq))
+        if cores > 0:
+            count = min(count, cores)
+        return max(1, count)
+
+    tasks_df['cpu_count'] = tasks_df.apply(_derive_count, axis=1).astype('int32')
+    tasks_df.drop(columns=['p95_mhz'], inplace=True)
+
     # Save to parquet files with explicit required schemas
     tasks_file = output_dir / "tasks.parquet"
     fragments_file = output_dir / "fragments.parquet"

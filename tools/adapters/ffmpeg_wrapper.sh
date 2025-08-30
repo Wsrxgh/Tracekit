@@ -46,9 +46,11 @@ set -e
 TS1=$(date +%s%3N)
 if [ -n "$OUTPUT" ] && [ -f "$OUTPUT" ]; then BYTES_OUT=$(stat -c %s "$OUTPUT" 2>/dev/null || echo 0); fi
 
+# Prefer externally provided enqueue time (from dispatcher/central scheduler) if present
+TS_ENQ=${TS_ENQUEUE:-$TS0}
 # write record (minimal fields; parse_sys.py will copy events.*.jsonl as invocations)
 # Use single line JSON format for proper JSONL
-echo "{\"trace_id\": \"${TRACE_ID:-}\", \"span_id\": null, \"parent_id\": null, \"module_id\": \"ffmpeg\", \"instance_id\": null, \"ts_enqueue\": $TS0, \"ts_start\": $TS0, \"ts_end\": $TS1, \"node\": \"$NODE_ID\", \"stage\": \"$STAGE\", \"method\": \"CLI\", \"path\": \"ffmpeg\", \"input\": \"${in_base:-}\", \"output\": \"${out_base:-}\", \"pid\": ${FFPID:-0}, \"bytes_in\": $BYTES_IN, \"bytes_out\": $BYTES_OUT, \"status\": $RC }" >> "$EVENT_FILE"
+echo "{\"trace_id\": \"${TRACE_ID:-}\", \"span_id\": null, \"parent_id\": null, \"module_id\": \"ffmpeg\", \"instance_id\": null, \"ts_enqueue\": $TS_ENQ, \"ts_start\": $TS0, \"ts_end\": $TS1, \"node\": \"$NODE_ID\", \"stage\": \"$STAGE\", \"method\": \"CLI\", \"path\": \"ffmpeg\", \"input\": \"${in_base:-}\", \"output\": \"${out_base:-}\", \"pid\": ${FFPID:-0}, \"bytes_in\": $BYTES_IN, \"bytes_out\": $BYTES_OUT, \"status\": $RC }" >> "$EVENT_FILE"
 
 echo "invocation appended → $EVENT_FILE" >&2
 exit $RC
