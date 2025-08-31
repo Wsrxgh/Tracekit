@@ -39,12 +39,77 @@ COMM_REGEX = re.compile(PROC_MATCH, re.IGNORECASE)
 def _default_iface() -> str:
     if IFACE:
         return IFACE
-    # Best-effort: use default route iface
+    # Best-effort: use default route iface to cloud0
+    try:
+        if VM_IP and VM_IP not in ("127.0.0.1", "localhost"):
+            out = subprocess.check_output(["bash", "-lc", f"ip route get {VM_IP} | awk '/dev/ {for(i=1;i<=NF;i++) if ($i==\"dev\") print $(i+1)}' | head -n1"], text=True).strip()
+            if out:
+                return out
+    except Exception:
+        pass
     try:
         out = subprocess.check_output(["bash", "-lc", "ip route show default | awk '/default/ {print $5; exit}'"], text=True).strip()
         return out or "lo"
     except Exception:
         return "lo"
+
+
+
+def write_node_meta() -> None:
+    host = subprocess.check_output(["bash", "-lc", "hostname"], text=True).strip()
+    # cpu cores
+    try:
+        cores = int(subprocess.check_output(["bash", "-lc", "nproc"], text=True).strip())
+    except Exception:
+        cores = 1
+    # mem MB
+    try:
+        mem_kb = int(subprocess.check_output(["bash", "-lc", "awk '/MemTotal/ {print $2}' /proc/meminfo"], text=True).strip())
+        mem_mb = mem_kb // 1024
+    except Exception:
+        mem_mb = 0
+    # cpu model & max MHz
+    cpu_model = subprocess.check_output(["bash", "-lc", "lscpu | awk -F: '/Model name/ {sub(/^ +/,\"\",$2); print $2; exit}'"], text=True).strip()
+    if not cpu_model:
+        try:
+            cpu_model = subprocess.check_output(["bash", "-lc", "grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ //'"], text=True).strip()
+        except Exception:
+            cpu_model = ""
+    try:
+        cpu_mhz_str = subprocess.check_output(["bash", "-lc", "lscpu | awk -F: '/CPU max MHz/ {sub(/^ +/,\"\",$2); print int($2); exit}'"], text=True).strip()
+        cpu_mhz = int(cpu_mhz_str) if cpu_mhz_str else 0
+    except Exception:
+        try:
+            cpu_mhz = int(float(subprocess.check_output(["bash", "-lc", "awk -F: '/cpu MHz/ {gsub(/^ +/,\"\",$2); print $2; exit}' /proc/cpuinfo"], text=True).strip()))
+        except Exception:
+            cpu_mhz = 0
+    obj = {
+        "run_id": RUN_ID, "node": NODE_ID, "stage": STAGE, "host": host,
+        "iface": _default_iface(), "cpu_cores": cores, "mem_mb": mem_mb,
+        "cpu_model": cpu_model, "cpu_freq_mhz": cpu_mhz,
+    }
+    (LOG_DIR / "node_meta.json").write_text(json.dumps(obj))
+
+
+def write_link_meta() -> None:
+    iface = _default_iface()
+    # BW via /sys/class/net (may be 0 for virtual)
+    try:
+        speed_mbps = int((Path(f"/sys/class/net/{iface}/speed").read_text().strip()))
+        bw_bps = speed_mbps * 1_000_000 if speed_mbps > 0 else 0
+    except Exception:
+        bw_bps = 0
+    # PR via ping min/2 (best effort)
+    pr_s = None
+    if VM_IP not in ("127.0.0.1", "localhost"):
+        try:
+            out = subprocess.check_output(["bash", "-lc", f"ping -n -c3 -i0.2 -w2 {VM_IP} | awk -F'[/= ]' '/rtt/ {{print $8}}'"], text=True).strip()
+            if out:
+                pr_s = float(out) / 2000.0  # ms→s, /2
+        except Exception:
+            pr_s = None
+    obj = {"iface": iface, "BW_bps": bw_bps, "PR_s": pr_s}
+    (LOG_DIR / "link_meta.json").write_text(json.dumps(obj))
 
 
 def _pg_kill(pid: int, sig: int) -> None:
@@ -65,6 +130,9 @@ def _pg_kill(pid: int, sig: int) -> None:
 
 
 def start_host_samplers() -> None:
+    # Write node/link metadata first (parse depends on them)
+    write_node_meta()
+    write_link_meta()
     iface = _default_iface()
     # mpstat
     mp = subprocess.Popen(["bash", "-lc", f"mpstat 1 > \"$0\"", str(LOG_DIR / "cpu.log")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
