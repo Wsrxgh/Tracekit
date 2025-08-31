@@ -42,7 +42,8 @@ def _default_iface() -> str:
     # Best-effort: use default route iface to cloud0
     try:
         if VM_IP and VM_IP not in ("127.0.0.1", "localhost"):
-            out = subprocess.check_output(["bash", "-lc", f"ip route get {VM_IP} | awk '/dev/ {for(i=1;i<=NF;i++) if ($i==\"dev\") print $(i+1)}' | head -n1"], text=True).strip()
+            cmd = "ip route get {} | awk '/dev/ {{for(i=1;i<=NF;i++) if ($i==\"dev\") print $(i+1)}}' | head -n1".format(VM_IP)
+            out = subprocess.check_output(["bash", "-lc", cmd], text=True).strip()
             if out:
                 return out
     except Exception:
