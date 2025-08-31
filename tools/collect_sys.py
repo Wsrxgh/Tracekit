@@ -207,9 +207,9 @@ def read_stat(pid: int) -> Optional[tuple[int, int]]:
             s = fh.read()
         # Extract after last ')'
         r = s.rsplit(')', 1)[-1].strip().split()
-        # utime=14, stime=15 in the full stat; in r (after comm & state) indexes are 12 and 13
-        ut = int(r[12])
-        st = int(r[13])
+        # utime=14, stime=15 in the full stat; in r (after comm & state) they are at indexes 11 and 12
+        ut = int(r[11])
+        st = int(r[12])
         return ut, st
     except Exception:
         return None
