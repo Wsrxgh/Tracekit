@@ -178,6 +178,8 @@ start_procmon() {
 
   # Optional: PID whitelist directory (sentinels created by wrapper). If set and non-empty, prefer it.
   local PID_DIR=${PROC_PID_DIR:-}
+  # Ensure directory exists if path provided; allows starting whitelist loop even before first PID appears
+  if [ -n "$PID_DIR" ]; then mkdir -p "$PID_DIR" 2>/dev/null || true; fi
 
   if [ -n "$PID_DIR" ] && [ -d "$PID_DIR" ]; then
     # Whitelist mode: sample only PIDs listed in PID_DIR; verify comm to avoid stale/alien PIDs
