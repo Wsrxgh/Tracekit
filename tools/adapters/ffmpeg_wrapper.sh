@@ -41,6 +41,11 @@ fi
 set +e
 ffmpeg "$@" &
 FFPID=$!
+# PID sentinel (optional): advertise PID to sampler if enabled
+PID_DIR="$LOG_DIR/pids"
+mkdir -p "$PID_DIR" 2>/dev/null || true
+: > "$PID_DIR/$FFPID" || true
+trap 'rm -f "$PID_DIR/$FFPID" 2>/dev/null || true' EXIT
 wait "$FFPID"; RC=$?
 set -e
 TS1=$(date +%s%3N)

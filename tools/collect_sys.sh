@@ -176,6 +176,16 @@ start_procmon() {
     MODE="host"
   fi
 
+  # Optional: PID whitelist directory (sentinels created by wrapper). If set and non-empty, prefer it.
+  local PID_DIR=${PROC_PID_DIR:-}
+
+  if [ -n "$PID_DIR" ] && [ -d "$PID_DIR" ]; then
+    # Whitelist mode: sample only PIDs listed in PID_DIR; verify comm to avoid stale/alien PIDs
+    nohup bash -c 'while :; do T0=$(date +%s%3N); TS=$T0; for f in "'$PID_DIR'"/*; do [ -e "$f" ] || break; bn=${f##*/}; pid=$bn; if [ -r "/proc/$pid/comm" ]; then c=$(cat "/proc/$pid/comm" 2>/dev/null); echo "$c" | grep -Eiq "'$PROC_MATCH'" || { rm -f "$f" 2>/dev/null || true; continue; }; if [ -r "/proc/$pid/stat" ]; then LINE=$(cat "/proc/$pid/stat" 2>/dev/null) || continue; REST=${LINE#*) }; set -- $REST; UT=${12}; ST=${13}; PAGES=$(cut -d" " -f2 "/proc/$pid/statm" 2>/dev/null); [ -n "$PAGES" ] || PAGES=0; RSS=$(( PAGES * 4 )); echo "{\"ts_ms\":$TS,\"pid\":$pid,\"rss_kb\":$RSS,\"utime\":$UT,\"stime\":$ST}"; fi; done >> "'$OUT'" 2>>"'$LOG_DIR'/procmon.err"; T1=$(date +%s%3N); EL=$((T1-T0)); REM=$(( ' '    echo $! > "$LOG_DIR/procmon.pid"
+    echo "proc sampler started (mode=host, whitelist=$PID_DIR, interval=${INTERVAL_SEC}s) → $OUT"
+    return
+  fi
+
   if [ "$MODE" = "container" ]; then
     # detect PIDs once based on PROC_MATCH (case-insensitive); fallback to 1
     local PIDS=$(docker exec -e PROC_MATCH="${PROC_MATCH}" "$CONTAINER" sh -lc '

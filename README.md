@@ -56,6 +56,15 @@ This section documents the exact steps currently used for my private tests with 
 
 Important: Redis requires auth. Always use URLs like `redis://:Wsr123@HOST:6379/0`.
 
+PID whitelist sampling (optional)
+- If you set `PROC_PID_DIR=logs/$RUN_ID/pids` when starting collectors, the sampler will only track PIDs listed in that directory (created by the ffmpeg wrapper). This avoids scanning /proc every tick and stabilizes sub-second sampling.
+- When not set, the sampler falls back to regex scanning (current default behavior), so this feature is opt-in and backward compatible.
+- How to enable:
+  - The wrapper will automatically create/remove a sentinel file per ffmpeg PID under `logs/$RUN_ID/pids`. Ensure collectors are started with `PROC_PID_DIR=logs/$RUN_ID/pids`.
+- When to use:
+  - Recommended for batch/worker-driven workloads (like your ffmpeg jobs) where workers launch target processes; yields lower dt_ms and minimal overhead.
+  - Not required (or useful) for generic hosts where you cannot modify how processes are launched; in that case keep regex scanning.
+
 1) Generate and distribute a RUN_ID (cloud0)
 ```bash
 cd ~/Tracekit
