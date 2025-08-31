@@ -52,16 +52,27 @@ run:
 	@echo "container started (healthcheck=disabled) (run_id=$(RUN_ID))"
 	@echo $(RUN_ID) > $(LOG_DIR)/.run_id
 start-collect:
+ifeq ($(USE_PY_COLLECT),1)
+	@RUN_ID=$(RUN_ID) NODE_ID=$(NODE_ID) STAGE=$(STAGE) IFACE=$(IFACE) VM_IP=$(VM_IP) \
+	 PROC_SAMPLING=$$PROC_SAMPLING PROC_REFRESH=$$PROC_REFRESH PROC_INTERVAL_MS=$$PROC_INTERVAL_MS \
+	 PROC_MATCH="$$PROC_MATCH" PROC_PID_DIR="$$PROC_PID_DIR" STOP_ALL="$$STOP_ALL" \
+	 python3 tools/collect_sys.py start
+else
 	@RUN_ID=$(RUN_ID) NODE_ID=$(NODE_ID) STAGE=$(STAGE) IFACE=$(IFACE) VM_IP=$(VM_IP) \
 	 PROC_SAMPLING=$$PROC_SAMPLING PROC_REFRESH=$$PROC_REFRESH PROC_INTERVAL_MS=$$PROC_INTERVAL_MS \
 	 PROC_MATCH="$$PROC_MATCH" bash tools/collect_sys.sh start
+endif
 
 load:
 	@RUN_ID=$(RUN_ID) bash tools/drive_load.sh $(VM_IP) $(RATE) $(DURATION) $(CPU_MS) $(RESP_KB) '$(CALL_URL)'
 
 
 stop-collect:
+ifeq ($(USE_PY_COLLECT),1)
+	@RUN_ID=$(RUN_ID) STOP_ALL="$$STOP_ALL" python3 tools/collect_sys.py stop
+else
 	@RUN_ID=$(RUN_ID) bash tools/collect_sys.sh stop
+endif
 
 parse:
 	@RUN_ID=$(RUN_ID) NODE_ID=$(NODE_ID) STAGE=$(STAGE) python3 tools/parse_sys.py
