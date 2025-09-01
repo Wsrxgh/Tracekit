@@ -6,7 +6,7 @@ A comprehensive cloud application tracing and performance monitoring framework d
 
 Tracekit provides multi-layer observability for cloud applications:
 - **Application-level**: Request/response tracing with timing and resource usage
-- **Process-level**: Per-PID CPU and memory monitoring  
+- **Process-level**: Per-PID CPU and memory monitoring
 - **System-level**: Host CPU, memory, and network metrics
 - **Infrastructure**: Node topology and link characteristics
 
@@ -19,51 +19,22 @@ Tracekit provides multi-layer observability for cloud applications:
 - 🐳 **Container-aware**: Works with Docker containers and bare metal
 - 🌐 **Multi-node**: Coordinate tracing across distributed deployments
 
-## Quick Start (single node)
-
-### 1. Start monitoring
-```bash
-make collect RUN_ID=test001 NODE_ID=cloud1 STAGE=cloud
-```
-
-### 2. Run your application
-```bash
-# For HTTP services - use the FastAPI example
-cd examples/fastapi_svc && make run
-
-# For batch jobs - use adapters
-tools/adapters/ffmpeg_wrapper.sh input.mp4 output.mp4
-
-# For existing services - use log adapters
-python3 tools/adapters/nginx_access_to_invocations.py --input access.log --output logs/test001/invocations.jsonl
-```
-
-### 3. Generate load (optional)
-```bash
-make load VM_IP=localhost RATE=50 DURATION=60s
-```
-
-### 4. Stop and parse
-```bash
-make stop-collect RUN_ID=test001
-make parse RUN_ID=test001 NODE_ID=cloud1 STAGE=cloud
-```
 
 ---
 
-## End-to-end multi-node trace collection test (current private test flow)
-This section documents the exact steps currently used for my private tests with a controller node (cloud0) and two workers (cloud1, cloud2). Redis runs on cloud0 and REQUIRES PASSWORD. All nodes share the same repo layout.
+## End-to-end multi-node trace collection test (current flow)
+This section documents the steps with a controller node (cloud0) and two workers (cloud1, cloud2). Redis runs on cloud0 and REQUIRES PASSWORD. All nodes share the same repo layout.
 
 Important: Redis requires auth. Always use URLs like `redis://:Wsr123@HOST:6379/0`.
 
-PID whitelist sampling (optional)
-- If you set `PROC_PID_DIR=logs/$RUN_ID/pids` when starting collectors, the sampler will only track PIDs listed in that directory (created by the ffmpeg wrapper). This avoids scanning /proc every tick and stabilizes sub-second sampling.
-- When not set, the sampler falls back to regex scanning (current default behavior), so this feature is opt-in and backward compatible.
+PID whitelist sampling (now default with Python collector)
+- By default we use the Python collector (USE_PY_COLLECT=1). If you set `PROC_PID_DIR=logs/$RUN_ID/pids` when starting collectors, it will only track PIDs listed in that directory (created by the ffmpeg wrapper). This avoids scanning /proc every tick and stabilizes sub-second sampling.
+- When not set, the sampler falls back to regex scanning.
 - How to enable:
-  - The wrapper will automatically create/remove a sentinel file per ffmpeg PID under `logs/$RUN_ID/pids`. Ensure collectors are started with `PROC_PID_DIR=logs/$RUN_ID/pids`.
+  - The wrapper automatically creates/removes a sentinel file per ffmpeg PID under `logs/$RUN_ID/pids`. Start collectors with `PROC_PID_DIR=logs/$RUN_ID/pids` to enable whitelist mode.
 - When to use:
-  - Recommended for batch/worker-driven workloads (like your ffmpeg jobs) where workers launch target processes; yields lower dt_ms and minimal overhead.
-  - Not required (or useful) for generic hosts where you cannot modify how processes are launched; in that case keep regex scanning.
+  - Recommended for batch/worker-driven workloads (ffmpeg jobs) where workers launch target processes; yields lower dt_ms and minimal overhead.
+  - For generic hosts where you cannot modify how processes are launched, keep regex scanning (no PROC_PID_DIR).
 
 1) Generate and distribute a RUN_ID (cloud0)
 ```bash
@@ -75,20 +46,82 @@ scp run_id.env <cloud2_user>@192.168.133.4:~/Tracekit/
 
 2) Start collectors on workers (cloud1 & cloud2)
 - Always `source run_id.env` on each worker.
-- Only match ffmpeg/ffprobe to avoid noise; refresh PID set every tick.
+- Default is Python collector; whitelist mode recommended (PROC_PID_DIR=logs/$RUN_ID/pids) for stable ~200ms sampling.
 ```bash
 # cloud1
 cd ~/Tracekit && source run_id.env
-PROC_SAMPLING=1 PROC_REFRESH=1 PROC_MATCH='^ffmpeg$|^ffprobe$' make start-collect RUN_ID=$RUN_ID NODE_ID=cloud1 STAGE=cloud VM_IP=192.168.133.2
+USE_PY_COLLECT=1 PROC_SAMPLING=1 PROC_REFRESH=1 PROC_INTERVAL_MS=200 PROC_PID_DIR=logs/$RUN_ID/pids \
+PROC_MATCH='^ffmpeg$|^ffprobe$' make start-collect RUN_ID=$RUN_ID NODE_ID=cloud1 STAGE=cloud VM_IP=192.168.133.2
 
 # cloud2
 cd ~/Tracekit && source run_id.env
-PROC_SAMPLING=1 PROC_REFRESH=1 PROC_MATCH='^ffmpeg$|^ffprobe$' make start-collect RUN_ID=$RUN_ID NODE_ID=cloud2 STAGE=cloud VM_IP=192.168.133.2
+USE_PY_COLLECT=1 PROC_SAMPLING=1 PROC_REFRESH=1 PROC_INTERVAL_MS=200 PROC_PID_DIR=logs/$RUN_ID/pids \
+PROC_MATCH='^ffmpeg$|^ffprobe$' make start-collect RUN_ID=$RUN_ID NODE_ID=cloud2 STAGE=cloud VM_IP=192.168.133.2
 ```
 Expected on each worker:
 ```
-proc sampler started (mode=host, match='^ffmpeg$|^ffprobe$', interval=1s) → logs/$RUN_ID/proc_metrics.jsonl
+proc sampler started (mode=whitelist, interval=0.200s) → logs/$RUN_ID/proc_metrics.jsonl
 ```
+
+
+### Full test flow (controller cloud0 + workers cloud1/cloud2)
+
+1) Optional: prepare short input on cloud0
+```bash
+cd ~/Tracekit && mkdir -p inputs/ffmpeg_quick && bash -lc 'ls inputs/ffmpeg/*.mp4 | head -n 2 | xargs -I{} cp -a "{}" inputs/ffmpeg_quick/'
+```
+
+2) On each worker, stop old collectors and clean outputs
+```bash
+# cloud1
+cd ~/Tracekit && source run_id.env && USE_PY_COLLECT=1 STOP_ALL=1 make stop-collect RUN_ID=$RUN_ID && rm -rf outputs/*
+# cloud2
+cd ~/Tracekit && source run_id.env && USE_PY_COLLECT=1 STOP_ALL=1 make stop-collect RUN_ID=$RUN_ID && rm -rf outputs/*
+```
+
+3) Start collectors (Python, whitelist, 200ms)
+```bash
+# cloud1
+cd ~/Tracekit && source run_id.env && USE_PY_COLLECT=1 PROC_SAMPLING=1 PROC_REFRESH=1 \
+PROC_INTERVAL_MS=200 PROC_PID_DIR=logs/$RUN_ID/pids PROC_MATCH='^ffmpeg$|^ffprobe$' \
+make start-collect RUN_ID=$RUN_ID NODE_ID=cloud1 STAGE=cloud VM_IP=192.168.133.2
+# cloud2
+cd ~/Tracekit && source run_id.env && USE_PY_COLLECT=1 PROC_SAMPLING=1 PROC_REFRESH=1 \
+PROC_INTERVAL_MS=200 PROC_PID_DIR=logs/$RUN_ID/pids PROC_MATCH='^ffmpeg$|^ffprobe$' \
+make start-collect RUN_ID=$RUN_ID NODE_ID=cloud2 STAGE=cloud VM_IP=192.168.133.2
+```
+
+4) Start workers
+```bash
+# cloud1
+cd ~/Tracekit && source run_id.env && NODE_ID=cloud1 RUN_ID=$RUN_ID python3 tools/scheduler/worker.py --outputs outputs --parallel 1 --redis "redis://:Wsr123@192.168.133.2:6379/0"
+# cloud2
+cd ~/Tracekit && source run_id.env && NODE_ID=cloud2 RUN_ID=$RUN_ID python3 tools/scheduler/worker.py --outputs outputs --parallel 1 --redis "redis://:Wsr123@192.168.133.2:6379/0"
+```
+
+5) On controller cloud0: start central scheduler and dispatch tasks
+```bash
+cd ~/Tracekit && nohup python3 tools/scheduler/scheduler_central.py --redis "redis://:Wsr123@127.0.0.1:6379/0" > logs/scheduler_central.log 2>&1 &
+cd ~/Tracekit && mkdir -p outputs && python3 tools/scheduler/dispatcher.py --inputs inputs/ffmpeg_quick --outputs outputs --policy rr3 --pending --pending-max 6 --batch-size 1 --dribble-interval 0.1 --redis "redis://:Wsr123@127.0.0.1:6379/0"
+```
+
+6) Stop collectors and parse on each worker when done
+```bash
+# cloud1
+cd ~/Tracekit && source run_id.env && USE_PY_COLLECT=1 STOP_ALL=1 make stop-collect RUN_ID=$RUN_ID && make parse RUN_ID=$RUN_ID NODE_ID=cloud1 STAGE=cloud
+# cloud2
+cd ~/Tracekit && source run_id.env && USE_PY_COLLECT=1 STOP_ALL=1 make stop-collect RUN_ID=$RUN_ID && make parse RUN_ID=$RUN_ID NODE_ID=cloud2 STAGE=cloud
+```
+
+7) Optional: export OpenDC on cloud0
+```bash
+cd ~/Tracekit && python3 tools/export_opendc.py --input logs/$RUN_ID --output opendc_traces_$RUN_ID
+```
+
+Notes:
+- The wrapper creates PID sentinels in `logs/$RUN_ID/pids`. Whitelist mode significantly stabilizes dt_ms.
+- If you need to fallback to the shell collector, run with `USE_PY_COLLECT=0`.
+- For very short-lived processes, consider setting `PROC_INTERVAL_MS=100` and/or enabling future inotify instant sampling (TBD).
 
 3) Start workers to process tasks (cloud1 & cloud2)
 - Pass RUN_ID so that ffmpeg wrapper writes events into logs/$RUN_ID.

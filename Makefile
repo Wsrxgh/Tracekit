@@ -2,6 +2,9 @@
 -include run_id.env
 
 RUN_ID ?= $(shell date -u +%Y%m%dT%H%M%SZ)
+# Use Python collector by default (set to 0 to fallback to shell collector)
+USE_PY_COLLECT ?= 1
+
 .EXPORT_ALL_VARIABLES:
 
 RATE ?= 50
