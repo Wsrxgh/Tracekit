@@ -9,7 +9,7 @@
 # - Process-group friendly kill on stop
 
 from __future__ import annotations
-import os, sys, time, json, signal, subprocess, re
+import os, sys, time, json, signal, subprocess, re, socket
 from pathlib import Path
 from typing import List, Optional
 
@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RUN_ID = os.getenv("RUN_ID", time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
 LOG_DIR = ROOT / "logs" / RUN_ID
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-NODE_ID = os.getenv("NODE_ID", "vm0")
+NODE_ID = os.getenv("NODE_ID") or socket.gethostname()
 STAGE = os.getenv("STAGE", "cloud")
 VM_IP = os.getenv("VM_IP", "127.0.0.1")
 IFACE = os.getenv("IFACE", "")

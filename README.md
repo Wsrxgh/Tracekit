@@ -20,6 +20,20 @@ Tracekit provides multi-layer observability for cloud applications:
 - 🌐 **Multi-node**: Coordinate tracing across distributed deployments
 
 
+## Variables and placeholders used in commands
+
+- RUN_ID: Shared identifier across all nodes for a test run. Put it in run_id.env and `source run_id.env` on every machine.
+- <controller_ip>: The IP or DNS name of the controller node (cloud0) where Redis runs. Replace with your actual address, e.g., 10.0.0.5.
+- NODE_ID: Optional. Defaults to the machine hostname for collectors and workers. Set explicitly only if you have a naming scheme.
+- STAGE: Environment tag (e.g., cloud). Defaults to `cloud` in examples.
+- PROC_PID_DIR: Enable PID whitelist mode (recommended): `logs/$RUN_ID/pids`.
+- USE_PY_COLLECT: 1 to use Python collector (default), 0 to fallback to shell collector.
+
+### Example topology (1 controller + 4 workers)
+- Controller (cloud0): runs Redis, central scheduler, dispatcher
+- Workers (cloud1..cloud4): each runs collector + worker; workers register slot tokens according to `--parallel`
+- Flow: dispatcher → q:pending → central scheduler → q:<node> → worker executes ffmpeg; collectors write system/proc metrics
+
 ---
 
 ## End-to-end multi-node trace collection test (current flow)
@@ -51,12 +65,12 @@ scp run_id.env <cloud2_user>@192.168.133.4:~/Tracekit/
 # cloud1
 cd ~/Tracekit && source run_id.env
 USE_PY_COLLECT=1 PROC_SAMPLING=1 PROC_REFRESH=1 PROC_INTERVAL_MS=200 PROC_PID_DIR=logs/$RUN_ID/pids \
-PROC_MATCH='^ffmpeg$|^ffprobe$' make start-collect RUN_ID=$RUN_ID NODE_ID=cloud1 STAGE=cloud VM_IP=192.168.133.2
+PROC_MATCH='^ffmpeg$|^ffprobe$' make start-collect RUN_ID=$RUN_ID STAGE=cloud VM_IP=<controller_ip>
 
 # cloud2
 cd ~/Tracekit && source run_id.env
 USE_PY_COLLECT=1 PROC_SAMPLING=1 PROC_REFRESH=1 PROC_INTERVAL_MS=200 PROC_PID_DIR=logs/$RUN_ID/pids \
-PROC_MATCH='^ffmpeg$|^ffprobe$' make start-collect RUN_ID=$RUN_ID NODE_ID=cloud2 STAGE=cloud VM_IP=192.168.133.2
+PROC_MATCH='^ffmpeg$|^ffprobe$' make start-collect RUN_ID=$RUN_ID STAGE=cloud VM_IP=<controller_ip>
 ```
 Expected on each worker:
 ```
@@ -94,9 +108,9 @@ make start-collect RUN_ID=$RUN_ID NODE_ID=cloud2 STAGE=cloud VM_IP=192.168.133.2
 4) Start workers
 ```bash
 # cloud1
-cd ~/Tracekit && source run_id.env && NODE_ID=cloud1 RUN_ID=$RUN_ID python3 tools/scheduler/worker.py --outputs outputs --parallel 1 --redis "redis://:Wsr123@192.168.133.2:6379/0"
+cd ~/Tracekit && source run_id.env && RUN_ID=$RUN_ID python3 tools/scheduler/worker.py --outputs outputs --parallel 1 --redis "redis://:Wsr123@192.168.133.2:6379/0"
 # cloud2
-cd ~/Tracekit && source run_id.env && NODE_ID=cloud2 RUN_ID=$RUN_ID python3 tools/scheduler/worker.py --outputs outputs --parallel 1 --redis "redis://:Wsr123@192.168.133.2:6379/0"
+cd ~/Tracekit && source run_id.env && RUN_ID=$RUN_ID python3 tools/scheduler/worker.py --outputs outputs --parallel 1 --redis "redis://:Wsr123@192.168.133.2:6379/0"
 ```
 
 5) On controller cloud0: start central scheduler and dispatch tasks
@@ -128,15 +142,15 @@ Notes:
 ```bash
 # cloud1
 cd ~/Tracekit && source run_id.env
-NODE_ID=cloud1 RUN_ID=$RUN_ID python3 tools/scheduler/worker.py \
+RUN_ID=$RUN_ID python3 tools/scheduler/worker.py \
   --outputs outputs --parallel 1 \
-  --redis "redis://:Wsr123@192.168.133.2:6379/0"
+  --redis "redis://:Wsr123@<controller_ip>:6379/0"
 
 # cloud2
 cd ~/Tracekit && source run_id.env
-NODE_ID=cloud2 RUN_ID=$RUN_ID python3 tools/scheduler/worker.py \
+RUN_ID=$RUN_ID python3 tools/scheduler/worker.py \
   --outputs outputs --parallel 1 \
-  --redis "redis://:Wsr123@192.168.133.2:6379/0"
+  --redis "redis://:Wsr123@<controller_ip>:6379/0"
 ```
 
 4) Start central scheduler on controller (cloud0)
@@ -224,7 +238,6 @@ See `docs/README.md` for detailed format specifications.
 ## Documentation
 
 - [Detailed Documentation](docs/README.md) - Complete setup and usage guide
-- [FastAPI Example](examples/fastapi_svc/README.md) - HTTP service tracing
 - [Scheduler Integration](tools/scheduler/README.md) - Batch job monitoring
 
 ## Requirements

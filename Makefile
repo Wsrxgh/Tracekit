@@ -21,8 +21,6 @@ VM_IP ?= 127.0.0.1
 
 LOG_DIR := logs/$(RUN_ID)
 
-SCEN ?= baseline
--include scenarios/$(SCEN).env
 
 .PHONY: setup build run start-collect load stop-collect parse baseline stop clean real-json real-gzip real-hash real-kvset real-kvget
 
@@ -32,14 +30,11 @@ setup:
 	  V=12.11.1; wget -q https://github.com/tsenart/vegeta/releases/download/v$$V/vegeta_$$V_linux_amd64.tar.gz && \
 	  tar -xzf vegeta_$$V_linux_amd64.tar.gz && sudo mv vegeta /usr/local/bin/ && rm -f vegeta_$$V_linux_amd64.tar.gz; \
 	fi
-	# Example service deps (optional)
-	@python3 -m pip -q install -r examples/fastapi_svc/requirements.txt || true
 	@mkdir -p $(LOG_DIR) logs
 	@echo "setup done"
 
 build:
-	# Example service image (optional)
-	docker build -t $(IMG) ./examples/fastapi_svc
+	@echo "(no example app build; focusing on ffmpeg + system collectors)"
 
 run:
 	mkdir -p $(LOG_DIR)

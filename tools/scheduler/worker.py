@@ -4,7 +4,7 @@ Worker: pulls tasks from per-node queue q:<NODE_ID> and runs ffmpeg via wrapper.
 No scheduling events are logged. Only ffmpeg completion is appended by the wrapper.
 """
 from __future__ import annotations
-import argparse, os, sys, json, shlex, subprocess, signal, threading
+import argparse, os, sys, json, shlex, subprocess, signal, threading, socket
 from pathlib import Path
 import redis
 
@@ -53,7 +53,7 @@ def main():
     ap.add_argument("--slots-key", default="slots:available")
     args = ap.parse_args()
 
-    node = os.getenv("NODE_ID", "vm0")
+    node = os.getenv("NODE_ID") or socket.gethostname()
     qname = f"q:{node}"
 
     r = redis.Redis.from_url(args.redis)
