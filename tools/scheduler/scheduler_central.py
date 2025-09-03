@@ -34,25 +34,67 @@ def main():
 
     while True:
         try:
+            # Get one capacity token
             tok = r.brpop(args.slots, timeout=5)
             if tok is None:
                 continue
             _, raw_node = tok
             node_id = raw_node.decode("utf-8")
 
-            task_raw = r.lpop(args.pending)
+            # Peek the next pending task (do not remove yet)
+            task_raw = r.lindex(args.pending, 0)
             if task_raw is None:
                 # No task; return the token
                 r.rpush(args.slots, node_id)
                 continue
 
-            # Forward task to node queue
+            # Inspect cpu_units requirement
+            try:
+                tpeek = json.loads(task_raw)
+                need = int(tpeek.get("cpu_units", 1))
+            except Exception:
+                need = 1
+
+            if need <= 1:
+                # Consume task and dispatch
+                r.lpop(args.pending)
+                qnode = f"q:{node_id}"
+                r.rpush(qnode, task_raw)
+                try:
+                    print(f"dispatch -> node={node_id} input={tpeek.get('input')} output={tpeek.get('output')}")
+                except Exception:
+                    print(f"dispatch -> node={node_id} raw_task={task_raw[:80]!r}")
+                continue
+
+            # For need > 1, try to acquire (need-1) more tokens for the same node
+            acquired = 1
+            extra_tokens = []
+            while acquired < need:
+                tok2 = r.brpop(args.slots, timeout=1)
+                if tok2 is None:
+                    break
+                _, raw_node2 = tok2
+                node_id2 = raw_node2.decode("utf-8")
+                if node_id2 == node_id:
+                    acquired += 1
+                else:
+                    # token from other node; stash to return later
+                    extra_tokens.append(node_id2)
+            if acquired < need:
+                # Not enough capacity; return all tokens
+                r.rpush(args.slots, node_id)
+                for nid in extra_tokens:
+                    r.rpush(args.slots, nid)
+                # small backoff to avoid tight loop
+                continue
+
+            # Enough capacity: consume task and dispatch
+            r.lpop(args.pending)
             qnode = f"q:{node_id}"
             r.rpush(qnode, task_raw)
-            # Optionally print brief log
+            # We do NOT push anything for the extra capacity here; it's already consumed by acquiring tokens
             try:
-                t = json.loads(task_raw)
-                print(f"dispatch -> node={node_id} input={t.get('input')} output={t.get('output')}")
+                print(f"dispatch -> node={node_id} input={tpeek.get('input')} output={tpeek.get('output')} cpu_units={need}")
             except Exception:
                 print(f"dispatch -> node={node_id} raw_task={task_raw[:80]!r}")
         except KeyboardInterrupt:

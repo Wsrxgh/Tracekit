@@ -4,7 +4,7 @@ Worker: pulls tasks from per-node queue q:<NODE_ID> and runs ffmpeg via wrapper.
 No scheduling events are logged. Only ffmpeg completion is appended by the wrapper.
 """
 from __future__ import annotations
-import argparse, os, sys, json, shlex, subprocess, signal, threading, socket
+import argparse, os, sys, json, shlex, subprocess, signal, threading, socket, psutil
 from pathlib import Path
 import redis
 
@@ -53,6 +53,11 @@ def run_task(task: dict, root: Path) -> int:
             env["TS_ENQUEUE"] = str(int(task["ts_enqueue"]))
         except Exception:
             pass
+    # Optional hard limits from task
+    if task.get("cpuset"):
+        env["CPUSET"] = str(task["cpuset"])
+    if task.get("cpu_quota"):
+        env["CPU_QUOTA"] = str(task["cpu_quota"])  # percent, e.g., 200
     # RUN_ID passthrough if defined
     if os.getenv("RUN_ID"):
         env["RUN_ID"] = os.getenv("RUN_ID")
@@ -78,13 +83,23 @@ def main():
 
     # Register available slots tokens according to parallel
     try:
+        # Treat 'parallel' as capacity units; push that many tokens
         for _ in range(max(0, args.parallel)):
             r.rpush(args.slots_key, node)
-        print(f"registered {args.parallel} slots for node={node} into {args.slots_key}")
+        print(f"registered capacity={args.parallel} for node={node} into {args.slots_key}")
     except Exception as e:
         print("failed to register slots:", e, file=sys.stderr)
 
     signal.signal(signal.SIGINT, handle_sigint)
+
+    # CPU core pool for cpuset rotation (optional). Detect 4 cores and parallel=2 -> [0-1, 2-3]
+    import psutil
+    total_cores = psutil.cpu_count(logical=True) or 1
+    core_sets = []
+    if args.parallel >= 2 and total_cores >= 4:
+        core_sets = [(0, 1), (2, 3)]
+    elif args.parallel >= 2 and total_cores == 2:
+        core_sets = [(0, 1), (0, 1)]
 
     # Simple thread pool
     from queue import Queue
@@ -102,22 +117,45 @@ def main():
             except Exception as e:
                 print("redis error:", e, file=sys.stderr)
 
-    def worker_loop():
+    # Track running workers to rotate cpusets
+    running_slots = {}
+    slot_lock = threading.Lock()
+
+    def next_cpuset_for(task: dict, slot_idx: int) -> str | None:
+        # If task specifies cpuset explicitly, honor it
+        if task.get("cpuset"):
+            return str(task["cpuset"])
+        # Otherwise, if we have predefined core sets and the task advertises cpu_units
+        if core_sets and int(task.get("cpu_units", 2)) >= 2:
+            a, b = core_sets[slot_idx % len(core_sets)]
+            return f"{a}-{b}"
+        return None
+
+    def worker_loop(slot_idx: int):
         while not STOP.is_set():
             try:
                 t = task_q.get(timeout=1)
             except Exception:
                 continue
             try:
+                # Inject cpuset dynamically if not set
+                dyn_cpuset = next_cpuset_for(t, slot_idx)
+                if dyn_cpuset and not t.get("cpuset"):
+                    t["cpuset"] = dyn_cpuset
                 rc = run_task(t, root)
                 if rc != 0:
                     print(f"task failed rc={rc}: {t}", file=sys.stderr)
                 else:
                     print(f"task ok: {t['input']} -> {t['output']}")
             finally:
-                # Return one slot token on completion
+                # Return capacity units on completion
                 try:
-                    r.rpush(args.slots_key, node)
+                    units = int(t.get("cpu_units", 1))
+                except Exception:
+                    units = 1
+                try:
+                    for _ in range(max(1, units)):
+                        r.rpush(args.slots_key, node)
                 except Exception as e:
                     print("failed to return slot:", e, file=sys.stderr)
                 task_q.task_done()
@@ -125,7 +163,7 @@ def main():
     fetch_t = threading.Thread(target=fetch_loop, daemon=True)
     fetch_t.start()
 
-    workers = [threading.Thread(target=worker_loop, daemon=True) for _ in range(args.parallel)]
+    workers = [threading.Thread(target=lambda idx=i: worker_loop(idx), daemon=True) for i in range(args.parallel)]
     for th in workers: th.start()
 
     try:

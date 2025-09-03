@@ -112,11 +112,11 @@ def main():
         # Returns dict with fields: scale, vcodec, preset, crf
         n = name.strip().lower()
         if n == "fast1080p":
-            return {"scale": "1920:1080", "vcodec": "h264", "preset": "fast", "crf": 28, "vthreads": 2, "fthreads": 2}
+            return {"scale": "1920:1080", "vcodec": "h264", "preset": "fast", "crf": 28, "vthreads": 2, "fthreads": 2, "cpuset": "0-1", "cpu_units": 2}
         if n == "medium480p":
-            return {"scale": "854:480", "vcodec": "h264", "preset": "medium", "crf": 28, "vthreads": 2, "fthreads": 2}
+            return {"scale": "854:480", "vcodec": "h264", "preset": "medium", "crf": 28, "vthreads": 2, "fthreads": 2, "cpuset": "0-1", "cpu_units": 2}
         if n == "hevc1080p":
-            return {"scale": "1920:1080", "vcodec": "hevc", "preset": "medium", "crf": 28, "vthreads": 4, "fthreads": 4}
+            return {"scale": "1920:1080", "vcodec": "hevc", "preset": "medium", "crf": 28, "vthreads": 4, "fthreads": 4, "cpu_units": 4}
         # fallback: default profile
         return {"scale": "1280:720", "vcodec": "h264", "preset": "veryfast", "crf": 28, "vthreads": 2, "fthreads": 2}
 

@@ -39,7 +39,15 @@ if [ -z "${TRACE_ID:-}" ]; then
   if command -v uuidgen >/dev/null 2>&1; then TRACE_ID=$(uuidgen); else TRACE_ID=$(date +%s%N); fi
 fi
 set +e
-ffmpeg "$@" &
+# Optional CPU limits: CPUSET="0-1" to pin cores; CPU_QUOTA=200 to cap at 200%
+LAUNCH=()
+if [ -n "${CPU_QUOTA:-}" ] && command -v systemd-run >/dev/null 2>&1; then
+  LAUNCH+=(systemd-run --scope -p CPUQuota=${CPU_QUOTA}%)
+fi
+if [ -n "${CPUSET:-}" ] && command -v taskset >/dev/null 2>&1; then
+  LAUNCH+=(taskset -c "${CPUSET}")
+fi
+"${LAUNCH[@]}" ffmpeg "$@" &
 FFPID=$!
 # PID sentinel (optional): advertise PID to sampler if enabled
 PID_DIR="$LOG_DIR/pids"
