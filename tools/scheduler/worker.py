@@ -18,13 +18,28 @@ def run_task(task: dict, root: Path) -> int:
     # Ensure output directory exists
     out_path = Path(task["output"]) if not str(task["output"]).startswith("/") else Path(task["output"])  # allow absolute
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Build ffmpeg command from task fields (supports vcodec=h264|hevc)
+    vcodec = str(task.get("vcodec", "h264")).lower()
+    libv = "libx265" if vcodec in ("hevc", "h265") else "libx264"
+    scale = str(task.get("scale", "1280:720"))
+    preset = str(task.get("preset", "veryfast"))
+    crf = str(task.get("crf", 28))
+    # Optional thread limits from task (vthreads for codec, fthreads for filters)
+    vthreads = str(task.get("vthreads", ""))
+    fthreads = str(task.get("fthreads", ""))
     cmd = [
         "bash", str(root / "tools" / "adapters" / "ffmpeg_wrapper.sh"),
         "-i", task["input"],
-        "-vf", f"scale={task['scale']}",
-        "-c:v", "libx264",
-        "-preset", str(task["preset"]),
-        "-crf", str(task["crf"]),
+        "-vf", f"scale={scale}",
+        "-c:v", libv,
+        "-preset", preset,
+        "-crf", str(crf),
+    ]
+    if vthreads and vthreads.isdigit():
+        cmd += ["-threads:v", vthreads]
+    if fthreads and fthreads.isdigit():
+        cmd += ["-filter_threads", fthreads]
+    cmd += [
         "-c:a", "copy",
         str(out_path),
     ]

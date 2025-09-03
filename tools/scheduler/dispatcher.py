@@ -86,7 +86,42 @@ def main():
     ap.add_argument("--crf", type=int, default=28)
     ap.add_argument("--nodes", default=",".join(DEFAULT_NODES))
     ap.add_argument("--policy", default="rr3")
+    # Mixed profiles: fast1080p / medium480p / hevc1080p
+    ap.add_argument("--mix", default="", help="e.g., fast1080p=50,medium480p=30,hevc1080p=20")
+    ap.add_argument("--total", type=int, default=0, help="Total tasks to generate when using --mix; 0 means per-input one task")
+    ap.add_argument("--seed", type=int, default=0, help="Seed to make mixed task sequence reproducible")
     ap.add_argument("--redis", default="redis://localhost:6379/0")
+
+    def parse_mix(mix: str) -> list[tuple[str,int]]:
+        pairs = []
+        for part in mix.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            try:
+                w = int(v)
+            except Exception:
+                continue
+            pairs.append((k.strip(), w))
+        return pairs
+
+    def profile_from_name(name: str) -> dict:
+        # Returns dict with fields: scale, vcodec, preset, crf
+        n = name.strip().lower()
+        if n == "fast1080p":
+            return {"scale": "1920:1080", "vcodec": "h264", "preset": "fast", "crf": 28, "vthreads": 2, "fthreads": 2}
+        if n == "medium480p":
+            return {"scale": "854:480", "vcodec": "h264", "preset": "medium", "crf": 28, "vthreads": 2, "fthreads": 2}
+        if n == "hevc1080p":
+            return {"scale": "1920:1080", "vcodec": "hevc", "preset": "medium", "crf": 28, "vthreads": 4, "fthreads": 4}
+        # fallback: default profile
+        return {"scale": "1280:720", "vcodec": "h264", "preset": "veryfast", "crf": 28, "vthreads": 2, "fthreads": 2}
+
+    import random
+
     # Central pending mode (global FIFO) options
     ap.add_argument("--pending", action="store_true", help="Enqueue to global pending queue q:pending for central scheduler")
     ap.add_argument("--pending-max", type=int, default=6, help="Max length of q:pending; dribble when full")
@@ -113,7 +148,71 @@ def main():
 
     # assign
     tasks = {n: [] for n in nodes}
-    if args.policy == "rr3":
+    # Mixed profiles handling
+    mix_pairs = parse_mix(args.mix) if args.mix else []
+    rng = random.Random(args.seed) if args.seed else random.Random()
+
+    if mix_pairs:
+        # Create a list of (profile_name) respecting weights
+        if args.total > 0:
+            # Proportional split with rounding and remainder fix
+            total_w = sum(max(0, w) for _, w in mix_pairs) or 1
+            base_counts = {name: (args.total * max(0, w)) // total_w for name, w in mix_pairs}
+            assigned = sum(base_counts.values())
+            # Distribute remainder by largest fractional part (here approximate by weight order)
+            remainder = args.total - assigned
+            order = sorted(mix_pairs, key=lambda x: x[1], reverse=True)
+            i = 0
+            while remainder > 0 and i < len(order):
+                base_counts[order[i][0]] += 1
+                remainder -= 1
+                i += 1
+            profile_sequence = []
+            for name, _ in mix_pairs:
+                profile_sequence += [name] * base_counts.get(name, 0)
+            # Shuffle deterministically by seed
+            rng.shuffle(profile_sequence)
+            # Pair inputs cyclically to reach total
+            tasks = {n: [] for n in nodes}
+            for idx in range(len(profile_sequence)):
+                p = files[idx % len(files)]
+                prof_name = profile_sequence[idx]
+                prof = profile_from_name(prof_name)
+                base = p.stem
+                # unique suffix by index
+                suffix = f"{prof['scale'].replace(':','x')}_{prof['vcodec']}_{prof['preset']}_n{idx:04d}"
+                out = str(outputs_dir / f"{base}_{suffix}.mp4")
+                # Choose node by rr across nodes for fairness
+                n = nodes[idx % len(nodes)]
+                t = {"input": str(p), "output": out, **prof}
+                tasks[n].append(t)
+        else:
+            # Per-input choose a profile by weighted random (seeded)
+            weights = [max(0, w) for _, w in mix_pairs]
+            names = [name for name, _ in mix_pairs]
+            total_w = sum(weights) or 1
+            # Build cumulative for sampling
+            cum = []
+            s = 0
+            for w in weights:
+                s += w
+                cum.append(s)
+            tasks = {n: [] for n in nodes}
+            for idx, p in enumerate(files):
+                r = rng.randint(1, s)
+                # find bucket
+                j = 0
+                while j < len(cum) and r > cum[j]:
+                    j += 1
+                prof_name = names[min(j, len(names)-1)]
+                prof = profile_from_name(prof_name)
+                base = p.stem
+                suffix = f"{prof['scale'].replace(':','x')}_{prof['vcodec']}_{prof['preset']}"
+                out = str(outputs_dir / f"{base}_{suffix}.mp4")
+                n = nodes[(idx) % len(nodes)]
+                t = {"input": str(p), "output": out, **prof}
+                tasks[n].append(t)
+    elif args.policy == "rr3":
         tasks = rr3_assign(files, nodes)
     elif args.policy in ("duration-greedy", "lpt-duration"):
         tasks = duration_greedy_assign(files, nodes)
@@ -157,14 +256,15 @@ def main():
         print(f"unknown policy: {args.policy}", file=sys.stderr)
         sys.exit(2)
 
-    # override params from CLI and rewrite outputs into provided dir
-    for n in tasks:
-        for t in tasks[n]:
-            t["scale"] = args.scale
-            t["preset"] = args.preset
-            t["crf"] = args.crf
-            base = Path(t["input"]).stem
-            t["output"] = str(outputs_dir / f"{base}_{args.scale.replace(':','x')}_crf{args.crf}.mp4")
+    # override params from CLI and rewrite outputs into provided dir (only when not using --mix)
+    if not mix_pairs:
+        for n in tasks:
+            for t in tasks[n]:
+                t["scale"] = args.scale
+                t["preset"] = args.preset
+                t["crf"] = args.crf
+                base = Path(t["input"]).stem
+                t["output"] = str(outputs_dir / f"{base}_{args.scale.replace(':','x')}_crf{args.crf}.mp4")
 
     # enqueue
     r = redis.Redis.from_url(args.redis)

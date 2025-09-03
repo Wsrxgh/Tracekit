@@ -52,3 +52,7 @@ body.bin
 check_*.py
 verify_*.py
 full_flow_*.py
+
+
+# Generated inputs
+inputs/ffmpeg/

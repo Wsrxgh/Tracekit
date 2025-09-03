@@ -34,6 +34,23 @@ Tracekit provides multi-layer observability for cloud applications:
 - Workers (cloud1..cloud4): each runs collector + worker; workers register slot tokens according to `--parallel`
 - Flow: dispatcher → q:pending → central scheduler → q:<node> → worker executes ffmpeg; collectors write system/proc metrics
 
+### New VM setup checklist
+- Common (all nodes):
+  - OS packages: `sudo apt update && sudo apt install -y sysstat ifstat jq python3 python3-pip redis-tools`
+  - Clone repo to `~/Tracekit` and ensure `run_id.env` present on each node
+- Controller node (cloud0):
+  - Install Redis server (if not present): `sudo apt install -y redis-server`
+  - Configure `/etc/redis/redis.conf`:
+    - `bind 0.0.0.0`
+    - `requirepass Wsr123`
+  - Restart and verify:
+    - `sudo systemctl restart redis-server`
+    - `redis-cli -a 'Wsr123' -h 127.0.0.1 -p 6379 ping` → PONG
+  - Open firewall for 6379 if needed (ufw/sg)
+- Workers:
+  - Verify connectivity: `redis-cli -a 'Wsr123' -h <controller_ip> -p 6379 ping` → PONG
+  - Ensure inputs directory exists and contains files matching controller paths (sync if no shared storage)
+
 ---
 
 ## End-to-end multi-node trace collection test (current flow)
@@ -116,12 +133,59 @@ cd ~/Tracekit && source run_id.env && RUN_ID=$RUN_ID python3 tools/scheduler/wor
 5) On controller cloud0: start central scheduler and dispatch tasks
 ```bash
 cd ~/Tracekit && nohup python3 tools/scheduler/scheduler_central.py --redis "redis://:Wsr123@127.0.0.1:6379/0" > logs/scheduler_central.log 2>&1 &
+# or dispatch mixed profiles with reproducible sequence (example: 50/30/20 over 100 tasks)
+cd ~/Tracekit && python3 tools/scheduler/dispatcher.py \
+  --inputs inputs/ffmpeg \
+  --outputs outputs \
+  --policy rr3 \
+  --pending --pending-max 6 --batch-size 1 --dribble-interval 0.1 \
+  --mix "fast1080p=50,medium480p=30,hevc1080p=20" --total 100 --seed 20250901 \
+  --redis "redis://:Wsr123@127.0.0.1:6379/0"
+
 cd ~/Tracekit && mkdir -p outputs && python3 tools/scheduler/dispatcher.py --inputs inputs/ffmpeg_quick --outputs outputs --policy rr3 --pending --pending-max 6 --batch-size 1 --dribble-interval 0.1 --redis "redis://:Wsr123@127.0.0.1:6379/0"
 ```
 
 6) Stop collectors and parse on each worker when done
 ```bash
+
+4.1) Restart central scheduler safely (controller)
+```bash
+# Stop old instances if any
+pkill -f tools/scheduler/scheduler_central.py || true
+# Start a fresh one
+nohup python3 tools/scheduler/scheduler_central.py --redis "redis://:Wsr123@127.0.0.1:6379/0" > logs/scheduler_central.log 2>&1 &
+pgrep -fl scheduler_central.py   # optional check
+```
+
 # cloud1
+
+#### Cautions (read before running)
+- Node naming consistency:
+  - Workers now default NODE_ID to hostname. Do not mix legacy NODE_ID values (e.g., cloud1/cloud2) with hostname-based workers in the same run.
+  - Symptom of mixing: slots:available shows both old and new names; central scheduler dispatches to q:old_name but no worker is listening.
+  - Fix sequence (controller):
+    ```bash
+    # Inspect
+    redis-cli -a 'Wsr123' LRANGE slots:available 0 -1
+    redis-cli -a 'Wsr123' LLEN q:cloud1 q:cloud2 q:<hostname1> q:<hostname2>
+    # Move tasks from old queues back to pending (repeat for any old queue names)
+    while [ "$(redis-cli -a 'Wsr123' LLEN q:cloud1)" -gt 0 ]; do redis-cli -a 'Wsr123' RPOPLPUSH q:cloud1 q:pending >/dev/null; done
+    while [ "$(redis-cli -a 'Wsr123' LLEN q:cloud2)" -gt 0 ]; do redis-cli -a 'Wsr123' RPOPLPUSH q:cloud2 q:pending >/dev/null; done
+    # Clear stale slot tokens
+    redis-cli -a 'Wsr123' DEL slots:available
+    ```
+  - Then restart central scheduler and (re)start workers.
+  - Will it happen after a reboot? If Redis is still running with the old lists in memory, yes. Clean `slots:available` and any old q:<name> queues when changing naming schemes.
+- Central scheduler: keep a single instance
+  - Start once per controller node. If you need to restart, first stop old ones:
+    ```bash
+    pkill -f tools/scheduler/scheduler_central.py || true
+    # then start
+    nohup python3 tools/scheduler/scheduler_central.py --redis "redis://:Wsr123@127.0.0.1:6379/0" \
+      > logs/scheduler_central.log 2>&1 &
+    ```
+  - Check running instances: `pgrep -fl scheduler_central.py`
+
 cd ~/Tracekit && source run_id.env && USE_PY_COLLECT=1 STOP_ALL=1 make stop-collect RUN_ID=$RUN_ID && make parse RUN_ID=$RUN_ID NODE_ID=cloud1 STAGE=cloud
 # cloud2
 cd ~/Tracekit && source run_id.env && USE_PY_COLLECT=1 STOP_ALL=1 make stop-collect RUN_ID=$RUN_ID && make parse RUN_ID=$RUN_ID NODE_ID=cloud2 STAGE=cloud
