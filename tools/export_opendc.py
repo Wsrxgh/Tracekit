@@ -80,6 +80,15 @@ def load_node_data(log_dir):
         'proc_rss': proc_rss
     }
 
+def _safe_freq_mhz(node_meta) -> float:
+    try:
+        v = float(node_meta.get('cpu_freq_mhz'))
+        return v if v > 0 else 2400.0
+    except Exception:
+        return 2400.0
+
+essential_min_mhz = 0.1  # lower bound to avoid zeros in downstream tools
+
 def calculate_cpu_requirements(invocation, node_meta, proc_cpu_data):
     """Calculate CPU count and capacity for a task based on actual CPU usage
 
@@ -88,38 +97,50 @@ def calculate_cpu_requirements(invocation, node_meta, proc_cpu_data):
     pid = invocation['pid']
     task_start = invocation['ts_start']
     task_end = invocation['ts_end']
-    task_duration_ms = task_end - task_start
+    task_duration_ms = max(0, task_end - task_start)
 
     # Find CPU samples for this PID during task execution
     task_cpu_samples = [
         sample for sample in proc_cpu_data
-        if sample['pid'] == pid and task_start <= sample['ts_ms'] <= task_end
+        if sample.get('pid') == pid and task_start <= sample.get('ts_ms', task_start) <= task_end
     ]
+
+    freq_mhz = _safe_freq_mhz(node_meta)
+    cores_cap = node_meta.get('cpu_cores')
+    try:
+        cores_cap = int(cores_cap) if cores_cap is not None else None
+        if cores_cap is not None and cores_cap <= 0:
+            cores_cap = None
+    except Exception:
+        cores_cap = None
 
     if not task_cpu_samples:
         # Fallback: assume single core, moderate usage
-        return 1, node_meta['cpu_freq_mhz'] * 0.5
+        return 1, max(freq_mhz * 0.5, essential_min_mhz)
 
     # Calculate peak core usage using actual dt if available
     def sample_cores(s):
         dt = s.get('dt_ms', 1000)
-        dt = max(dt, 1)
-        return s['cpu_ms'] / dt
+        dt = max(int(dt) if dt is not None else 1000, 1)
+        cpu_ms = float(s.get('cpu_ms', 0.0))
+        return max(0.0, cpu_ms / dt)
+
     peak_cores = max(sample_cores(s) for s in task_cpu_samples)
 
-    # Determine how many cores were actually used (round to nearest, clamp to available cores)
+    # Determine how many cores were actually used (round to nearest, clamp to available cores if known)
     cores_used = max(1, int(peak_cores + 0.5))
-    cores_used = min(cores_used, node_meta['cpu_cores'])  # Can't exceed available cores
+    if cores_cap is not None:
+        cores_used = min(cores_used, cores_cap)
 
     # Calculate total CPU time used during task execution
-    total_cpu_ms = sum(sample['cpu_ms'] for sample in task_cpu_samples)
+    total_cpu_ms = sum(float(sample.get('cpu_ms', 0.0)) for sample in task_cpu_samples)
 
     # Calculate average utilization per core
     if task_duration_ms > 0 and cores_used > 0:
         avg_utilization_per_core = (total_cpu_ms / task_duration_ms) / cores_used
-        cpu_capacity_per_core = node_meta['cpu_freq_mhz'] * min(avg_utilization_per_core, 1.0)
+        cpu_capacity_per_core = freq_mhz * min(max(avg_utilization_per_core, 0.0), 1.0)
     else:
-        cpu_capacity_per_core = node_meta['cpu_freq_mhz'] * 0.1
+        cpu_capacity_per_core = freq_mhz * 0.1
 
     return cores_used, max(cpu_capacity_per_core, 1.0)
 
@@ -286,7 +307,7 @@ def generate_fragments(all_node_data, tasks_df):
                 if head_duration > 0:
                     first_cores = max(0.0, float(first_sample['cpu_ms']) / float(dt0))
                     first_cores = min(first_cores, float(node_meta.get('cpu_cores', first_cores)))
-                    head_mhz = max(first_cores * node_meta['cpu_freq_mhz'], 0.1)
+                    head_mhz = max(first_cores * _safe_freq_mhz(node_meta), essential_min_mhz)
                     fragments.append({'id': task_id, 'duration': int(head_duration), 'cpu_usage': float(head_mhz)})
 
             # Then append fragments for each proc_cpu interval (clip first interval to its own window start)
@@ -313,7 +334,7 @@ def generate_fragments(all_node_data, tasks_df):
                 # Calculate CPU usage and clamp to available cores
                 cores_used = max(0.0, float(cpu_ms_adj) / float(duration))
                 cores_used = min(cores_used, float(node_meta.get('cpu_cores', cores_used)))
-                avg_mhz_demand = max(cores_used * node_meta['cpu_freq_mhz'], 0.1)
+                avg_mhz_demand = max(cores_used * _safe_freq_mhz(node_meta), essential_min_mhz)
 
                 fragments.append({'id': task_id, 'duration': int(duration), 'cpu_usage': float(avg_mhz_demand)})
                 # track peak per task
