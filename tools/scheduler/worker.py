@@ -74,6 +74,17 @@ def main():
     ap.add_argument("--capacity-units", type=int, default=0, help="Total CPU capacity units for this worker (default: logical cores)")
     args = ap.parse_args()
 
+    # Ensure psutil is available early
+    try:
+        import psutil  # noqa: F401
+    except Exception as e:
+        print("psutil not available; defaulting capacity to 1:", e, file=sys.stderr)
+        class _Ps:
+            @staticmethod
+            def cpu_count(logical=True):
+                return 1
+        psutil = _Ps()
+
     node = os.getenv("NODE_ID") or socket.gethostname()
     qname = f"q:{node}"
 
@@ -103,7 +114,6 @@ def main():
     signal.signal(signal.SIGINT, handle_sigint)
 
     # CPU core pool for cpuset rotation (optional). Detect 4 cores and parallel=2 -> [0-1, 2-3]
-    import psutil
     total_cores = psutil.cpu_count(logical=True) or 1
     core_sets = []
     if args.parallel >= 2 and total_cores >= 4:
