@@ -168,14 +168,20 @@ def main():
                 else:
                     print(f"task ok: {t['input']} -> {t['output']}")
             finally:
-                # Return capacity units on completion
+                # Return CPU capacity and one concurrency slot on completion
                 try:
                     units = int(t.get("cpu_units", 1))
                 except Exception:
                     units = 1
+                # increment capacity back
                 try:
-                    for _ in range(max(1, units)):
-                        r.rpush(args.slots_key, node)
+                    cap_key = f"cap:{node}"
+                    r.incrby(cap_key, max(1, units))
+                except Exception as e:
+                    print("failed to return capacity:", e, file=sys.stderr)
+                # return one concurrency slot
+                try:
+                    r.rpush(args.slots_key, node)
                 except Exception as e:
                     print("failed to return slot:", e, file=sys.stderr)
                 task_q.task_done()
