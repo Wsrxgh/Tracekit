@@ -71,6 +71,7 @@ def main():
     ap.add_argument("--redis", default="redis://localhost:6379/0")
     ap.add_argument("--parallel", type=int, default=1)
     ap.add_argument("--slots-key", default="slots:available")
+    ap.add_argument("--capacity-units", type=int, default=0, help="Total CPU capacity units for this worker (default: logical cores)")
     args = ap.parse_args()
 
     node = os.getenv("NODE_ID") or socket.gethostname()
@@ -81,14 +82,23 @@ def main():
     root = Path(__file__).resolve().parents[2]
     print(f"Worker node={node} queue={qname} redis={args.redis} parallel={args.parallel}")
 
-    # Register available slots tokens according to parallel
+    # Initialize concurrency slots and CPU capacity counter
     try:
-        # Treat 'parallel' as capacity units; push that many tokens
+        # Concurrency slots: at most 'parallel' concurrent tasks
         for _ in range(max(0, args.parallel)):
             r.rpush(args.slots_key, node)
-        print(f"registered capacity={args.parallel} for node={node} into {args.slots_key}")
+        # CPU capacity units: default to logical cores if not provided
+        total_cores = psutil.cpu_count(logical=True) or 1
+        cap_units = args.capacity_units if args.capacity_units and args.capacity_units > 0 else total_cores
+        cap_key = f"cap:{node}"
+        # Set only if absent to avoid clobbering during restarts with running tasks
+        try:
+            r.setnx(cap_key, cap_units)
+        except Exception:
+            pass
+        print(f"registered slots={args.parallel}, capacity_units={cap_units} for node={node}")
     except Exception as e:
-        print("failed to register slots:", e, file=sys.stderr)
+        print("failed to register slots/capacity:", e, file=sys.stderr)
 
     signal.signal(signal.SIGINT, handle_sigint)
 
