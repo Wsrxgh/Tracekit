@@ -53,21 +53,32 @@ Tracekit provides multi-layer observability for cloud applications:
 
 
 ### Concurrency and capacity (READ THIS)
-- parallel (per worker): maximum number of tasks that can run concurrently on that node
-- cpu_units (per task): CPU capacity required by a task; defaults from profiles:
+- **parallel** (per worker): maximum number of tasks that can run concurrently on that node
+- **cpu_units** (per task): CPU capacity required by a task; defaults from profiles:
   - fast1080p=2, medium480p=2, hevc1080p=4
-- capacity-units (per worker): total CPU capacity of the node exposed to the scheduler (default = logical cores). Set explicitly to keep tests reproducible, e.g., --capacity-units 4
-- Dispatch rule: a task is dispatched to a node only if BOTH are satisfied:
+- **capacity-units** (per worker): total CPU capacity of the node exposed to the scheduler (default = logical cores). Set explicitly to keep tests reproducible, e.g., --capacity-units 4
+- **Dispatch rule**: a task is dispatched to a node only if BOTH are satisfied:
   - the node has at least 1 free concurrency slot (parallel)
   - the node has remaining capacity >= task.cpu_units
 - On completion, the task returns 1 concurrency slot and cpu_units capacity to the node.
 
+### Scheduling algorithm (Strict FIFO + First-Fit)
+- **Strict FIFO**: only considers head of q:pending queue
+- **First-Fit**: scans available nodes in stable order (sorted by node_id), dispatches to first feasible host
+- **Head-of-line blocking**: if head task (e.g., hevc needing 4 units) cannot be placed on any node, it blocks the queue until resources become available
+- **Non-blocking scan**: uses LLEN/LRANGE to snapshot available slot tokens, avoids spin on single-token BRPOP
+
 ### Mixed profiles and reproducibility
 - Use --mix to specify ratios, --total for total number of tasks, and --seed for a reproducible sequence.
-- Example: --mix "fast1080p=40,medium480p=40,hevc1080p=20" --total 50 --seed 20250901
+- Example: --mix "fast1080p=40,medium480p=40,hevc1080p=20" --total 5 --seed 20250901
+- Built-in profiles:
+  - **fast1080p**: 1920x1080, H.264, preset=fast, cpu_units=2, cpuset=0-1, vthreads=2
+  - **medium480p**: 854x480, H.264, preset=medium, cpu_units=2, cpuset=0-1, vthreads=2
+  - **hevc1080p**: 1920x1080, HEVC, preset=medium, cpu_units=4, vthreads=4 (no cpuset binding)
 
 ### Test inputs generator
 - Use tools/generate_test_videos.py to synthesize 1080p/30fps inputs with controlled complexity (H.264 yuv420p, ~8 Mbps, GOP~90)
+- Noise distribution: 1/3 no noise, 1/3 low noise, 1/3 medium noise across different patterns
 - .gitignore ignores inputs/ffmpeg/
 
 ---
