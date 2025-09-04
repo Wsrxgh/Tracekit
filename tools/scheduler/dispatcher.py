@@ -128,7 +128,7 @@ def main():
     # Dribble mode options
     ap.add_argument("--drip", action="store_true", help="Enable dribble (small-batch) enqueue loop")
     ap.add_argument("--batch-size", type=int, default=1)
-    ap.add_argument("--dribble-interval", type=float, default=0.1)
+    ap.add_argument("--dribble-interval", type=float, default=1.0)
     ap.add_argument("--backlog-limit", type=int, default=1, help="Max queued tasks per node (approx by LLEN)")
     args = ap.parse_args()
 

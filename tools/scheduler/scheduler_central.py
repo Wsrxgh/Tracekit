@@ -18,7 +18,7 @@ Notes:
 - Nodes list is not required; tokens arriving are the source of truth.
 """
 from __future__ import annotations
-import argparse, json, sys
+import argparse, json, sys, time
 import redis
 
 
@@ -27,6 +27,9 @@ def main():
     ap.add_argument("--redis", default="redis://localhost:6379/0")
     ap.add_argument("--pending", default="q:pending")
     ap.add_argument("--slots", default="slots:available")
+    ap.add_argument("--scan-slots", type=int, default=0, help="Max distinct hosts to scan per cycle; 0=all available tokens")
+    ap.add_argument("--scan-pending", type=int, default=1, help="How many pending tasks to consider from head (FIFO if 1)")
+
     args = ap.parse_args()
 
     r = redis.Redis.from_url(args.redis)
@@ -34,49 +37,93 @@ def main():
 
     while True:
         try:
-            # Get one concurrency slot token
-            tok = r.brpop(args.slots, timeout=5)
-            if tok is None:
-                continue
-            _, raw_node = tok
-            node_id = raw_node.decode("utf-8")
-
-            # Peek the next pending task (do not remove yet)
+            # Strict FIFO: only consider head of pending
             task_raw = r.lindex(args.pending, 0)
             if task_raw is None:
-                # No task; return the slot token
-                r.rpush(args.slots, node_id)
+                time.sleep(0.05)
                 continue
-
-            # Inspect cpu_units requirement
             try:
                 tpeek = json.loads(task_raw)
                 need = int(tpeek.get("cpu_units", 1))
             except Exception:
                 need = 1
 
-            # Check CPU capacity for this node
-            cap_key = f"cap:{node_id}"
+            # Snapshot available slots non-blocking and build token counts per node
+            n = r.llen(args.slots) or 0
+            if n <= 0:
+                time.sleep(0.05)
+                continue
+            # Limit scan by --scan-slots if set (>0)
+            max_scan = n if int(args.scan_slots) <= 0 else min(n, int(args.scan_slots))
+            # Get rightmost max_scan tokens snapshot (BRPOP takes from right). LRANGE uses [start,end]
+            # Rightmost k -> indices [n-k, n-1]
+            start = max(0, n - max_scan)
+            tokens = r.lrange(args.slots, start, n - 1)
+            counts = {}
+            order = []
+            for raw in tokens:
+                nid = raw.decode("utf-8")
+                counts[nid] = counts.get(nid, 0) + 1
+                if nid not in order:
+                    order.append(nid)
+
+            # Stable host order = sorted unique node ids (or keep snapshot order); choose sorted for determinism
+            hosts = sorted(order)
+            chosen = None
+            for nid in hosts:
+                cap_key = f"cap:{nid}"
+                try:
+                    cap_free = int(r.get(cap_key) or 0)
+                except Exception:
+                    cap_free = 0
+                if counts.get(nid, 0) > 0 and cap_free >= need:
+                    chosen = nid
+                    break
+
+            if not chosen:
+                # Head-of-line blocking: nothing feasible now
+                time.sleep(0.05)
+                continue
+
+            # Consume one token from chosen node (remove from rightmost segment if present; fallback full list remove)
+            removed = False
+            # Try RPOPLPUSH loop up to max_scan to move non-chosen tokens to front and expose chosen at tail
+            # This is O(k) where k<=max_scan, keeps list mostly intact and avoids long scans.
+            for _ in range(max_scan):
+                tail = r.rpoplpush(args.slots, args.slots)
+                if tail is None:
+                    break
+                if tail.decode("utf-8") == chosen:
+                    # We moved chosen from tail to head; now pop head to consume it
+                    r.lpop(args.slots)
+                    removed = True
+                    break
+            if not removed:
+                # Fallback: remove one occurrence anywhere
+                r.lrem(args.slots, 1, chosen)
+
+            # Re-check cap and dispatch
+            cap_key = f"cap:{chosen}"
             try:
                 cap_free = int(r.get(cap_key) or 0)
             except Exception:
                 cap_free = 0
-
-            if cap_free >= need:
-                # Reserve capacity and dispatch
-                new_free = cap_free - need
-                r.set(cap_key, new_free)
-                r.lpop(args.pending)
-                qnode = f"q:{node_id}"
-                r.rpush(qnode, task_raw)
-                try:
-                    print(f"dispatch -> node={node_id} input={tpeek.get('input')} output={tpeek.get('output')} cpu_units={need} cap_left={new_free}")
-                except Exception:
-                    print(f"dispatch -> node={node_id} raw_task={task_raw[:80]!r}")
+            if cap_free < need:
+                # Capacity changed; abort (token remains consumed, but worker will return it on next completion)
+                # To be safe, give the slot back immediately
+                r.rpush(args.slots, chosen)
+                time.sleep(0.05)
                 continue
 
-            # Not enough CPU capacity; return the slot and retry later
-            r.rpush(args.slots, node_id)
+            new_free = cap_free - need
+            r.set(cap_key, new_free)
+            r.lpop(args.pending)
+            qnode = f"q:{chosen}"
+            r.rpush(qnode, task_raw)
+            try:
+                print(f"dispatch -> node={chosen} input={tpeek.get('input')} output={tpeek.get('output')} cpu_units={need} cap_left={new_free}")
+            except Exception:
+                print(f"dispatch -> node={chosen} raw_task={task_raw[:80]!r}")
             continue
         except KeyboardInterrupt:
             print("stopping central scheduler...")
