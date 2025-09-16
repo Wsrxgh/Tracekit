@@ -112,11 +112,15 @@ def main():
         # Returns dict with fields: scale, vcodec, preset, crf
         n = name.strip().lower()
         if n == "fast1080p":
-            return {"scale": "1920:1080", "vcodec": "h264", "preset": "fast", "crf": 28, "vthreads": 2, "fthreads": 2, "cpuset": "0-1", "cpu_units": 2}
+            return {"scale": "1920:1080", "vcodec": "h264", "preset": "fast", "crf": 28, "vthreads": 2, "fthreads": 2, "cpu_units": 2}
         if n == "medium480p":
-            return {"scale": "854:480", "vcodec": "h264", "preset": "medium", "crf": 28, "vthreads": 2, "fthreads": 2, "cpuset": "0-1", "cpu_units": 2}
+            return {"scale": "854:480", "vcodec": "h264", "preset": "medium", "crf": 28, "vthreads": 2, "fthreads": 2, "cpu_units": 2}
         if n == "hevc1080p":
+            # No fixed cpuset; let worker inject cpuset by cpu_units to strictly cap to 4 cores
             return {"scale": "1920:1080", "vcodec": "hevc", "preset": "medium", "crf": 28, "vthreads": 4, "fthreads": 4, "cpu_units": 4}
+        if n in ("light1c", "light480p1c", "light_1c"):
+            # Very light profile: 1 core, single-threaded encode & filter (no fixed cpuset to allow rotation)
+            return {"scale": "854:480", "vcodec": "h264", "preset": "veryfast", "crf": 28, "vthreads": 1, "fthreads": 1, "cpu_units": 1}
         # fallback: default profile
         return {"scale": "1280:720", "vcodec": "h264", "preset": "veryfast", "crf": 28, "vthreads": 2, "fthreads": 2}
 
@@ -124,8 +128,11 @@ def main():
 
     # Central pending mode (global FIFO) options
     ap.add_argument("--pending", action="store_true", help="Enqueue to global pending queue q:pending for central scheduler")
-    ap.add_argument("--pending-max", type=int, default=6, help="Max length of q:pending; dribble when full")
-    # Dribble mode options
+    ap.add_argument("--pending-max", type=int, default=6, help="Max length of q:pending; used by fifo mode")
+    ap.add_argument("--pending-mode", choices=["pulse", "fifo"], default="pulse", help="pending submission mode: pulse (default) or fifo")
+    ap.add_argument("--pulse-size", type=int, default=10, help="Tasks per pulse when pending-mode=pulse")
+    ap.add_argument("--pulse-interval", type=float, default=100.0, help="Seconds between pulses when pending-mode=pulse")
+    # Dribble mode options (non-pending or online modes)
     ap.add_argument("--drip", action="store_true", help="Enable dribble (small-batch) enqueue loop")
     ap.add_argument("--batch-size", type=int, default=1)
     ap.add_argument("--dribble-interval", type=float, default=1.0)
@@ -184,7 +191,7 @@ def main():
                 out = str(outputs_dir / f"{base}_{suffix}.mp4")
                 # Choose node by rr across nodes for fairness
                 n = nodes[idx % len(nodes)]
-                t = {"input": str(p), "output": out, **prof}
+                t = {"input": str(p), "output": out, "_seq": idx, **prof}
                 tasks[n].append(t)
         else:
             # Per-input choose a profile by weighted random (seeded)
@@ -210,7 +217,7 @@ def main():
                 suffix = f"{prof['scale'].replace(':','x')}_{prof['vcodec']}_{prof['preset']}"
                 out = str(outputs_dir / f"{base}_{suffix}.mp4")
                 n = nodes[(idx) % len(nodes)]
-                t = {"input": str(p), "output": out, **prof}
+                t = {"input": str(p), "output": out, "_seq": idx, **prof}
                 tasks[n].append(t)
     elif args.policy == "rr3":
         tasks = rr3_assign(files, nodes)
@@ -269,43 +276,64 @@ def main():
     # enqueue
     r = redis.Redis.from_url(args.redis)
 
-    # Global pending mode: pack all tasks into a single list for FIFO
+    # Global pending mode: pack all tasks into a single list
     if args.pending:
-        # Flatten tasks list preserving original order (by file name)
+        # Flatten tasks list; if tasks carry _seq, sort by it for strict global FIFO
         global_list = []
         for n in nodes:
             for t in tasks[n]:
                 global_list.append(t)
-        # Dribble into q:pending with max length guard and unique submission_time spacing
+        if any((isinstance(t, dict) and "_seq" in t) for t in global_list):
+            global_list.sort(key=lambda x: x.get("_seq", 1<<30))
         idx = 0
         total = 0
         last_enq_ms = 0
-        while idx < len(global_list):
-            qlen = int(r.llen("q:pending"))
-            sent = 0
-            while sent < args.batch_size and idx < len(global_list):
-                if qlen >= args.pending_max:
-                    break
-                t = global_list[idx]
-                # set submission fields
-                now_ms = int(time.time() * 1000)
-                # ensure monotonic increasing submission times (avoid identical ms)
-                if now_ms <= last_enq_ms:
-                    now_ms = last_enq_ms + 1
-                last_enq_ms = now_ms
-                t["ts_enqueue"] = now_ms
-                r.rpush("q:pending", json.dumps(t))
-                qlen += 1
-                total += 1
-                sent += 1
-                idx += 1
-            if sent > 0:
-                print(f"[pending] enqueued batch={sent}, total={total}, qlen={qlen}")
-            if idx < len(global_list):
-                # dribble small sleep to spread submission_time while respecting pending_max
-                time.sleep(max(0.0, args.dribble_interval))
-        print(f"[pending] done, total enqueued={total}")
-        return
+
+        if args.pending_mode == "pulse":
+            # Periodic pulse submission: push pulse-size tasks every pulse-interval seconds
+            while idx < len(global_list):
+                sent = 0
+                while sent < max(1, args.pulse_size) and idx < len(global_list):
+                    t = global_list[idx]
+                    now_ms = int(time.time() * 1000)
+                    if now_ms <= last_enq_ms:
+                        now_ms = last_enq_ms + 1
+                    last_enq_ms = now_ms
+                    t["ts_enqueue"] = now_ms
+                    r.rpush("q:pending", json.dumps(t))
+                    total += 1
+                    sent += 1
+                    idx += 1
+                print(f"[pending-pulse] enqueued pulse={sent}, total={total}")
+                if idx < len(global_list):
+                    time.sleep(max(0.0, args.pulse_interval))
+            print(f"[pending-pulse] done, total enqueued={total}")
+            return
+        else:
+            # FIFO with pending_max guard and small dribble sleep
+            while idx < len(global_list):
+                qlen = int(r.llen("q:pending"))
+                sent = 0
+                while sent < args.batch_size and idx < len(global_list):
+                    if qlen >= args.pending_max:
+                        break
+                    t = global_list[idx]
+                    now_ms = int(time.time() * 1000)
+                    if now_ms <= last_enq_ms:
+                        now_ms = last_enq_ms + 1
+                    last_enq_ms = now_ms
+                    t["ts_enqueue"] = now_ms
+                    r.rpush("q:pending", json.dumps(t))
+                    qlen += 1
+                    total += 1
+                    sent += 1
+                    idx += 1
+                if sent > 0:
+                    print(f"[pending] enqueued batch={sent}, total={total}, qlen={qlen}")
+                if idx < len(global_list):
+                    time.sleep(max(0.0, args.dribble_interval))
+            print(f"[pending] done, total enqueued={total}")
+            return
 
     if not args.drip:
         total = 0

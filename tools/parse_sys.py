@@ -134,62 +134,51 @@ with open(links_out, "w", encoding="utf-8") as lout:
                 })+"\n")
 print(f"[parse] links → {links_out}")
 
-# ---------- 6) 标准化 per-PID 采样（proc_metrics → cctf） ----------
+# ---------- 6) 标准化 per-PID 采样（合并为 CCTF proc_metrics） ----------
 proc_metrics = LOGS / "proc_metrics.jsonl"
 if proc_metrics.exists():
     cctf_dir.mkdir(exist_ok=True)
-    # 直通导出（保留原始单位：rss_kb，utime/stime 为 tick）
-    import shutil as _sh
-    _sh.copy(proc_metrics, cctf_dir / "proc_metrics.jsonl")
-    # 可选：导出按采样差分的 CPU ms（方便后续导出 OpenDC Fragments）
+    # 生成合并后的 CCTF proc_metrics：每行包含 {ts_ms, pid, dt_ms, cpu_ms, rss_kb}
     try:
         CLK_TCK = int(os.popen("getconf CLK_TCK").read().strip() or "100")
     except Exception:
         CLK_TCK = 100
-    proc_cpu_out = cctf_dir / "proc_cpu.jsonl"
-    proc_rss_out = cctf_dir / "proc_rss.jsonl"
-    last = {}  # key: pid -> (utime, stime, timestamp)
-    with open(proc_cpu_out, "w", encoding="utf-8") as cpu_out, open(proc_rss_out, "w", encoding="utf-8") as rss_out:
-        for line in open(proc_metrics, "r", encoding="utf-8", errors="ignore"):
+    merged_out = cctf_dir / "proc_metrics.jsonl"
+    last = {}  # pid -> (utime, stime, ts_ms)
+    with open(proc_metrics, "r", encoding="utf-8", errors="ignore") as fin, \
+         open(merged_out, "w", encoding="utf-8") as mout:
+        for line in fin:
             try:
                 o = json.loads(line)
-            except:
+            except Exception:
                 continue
             ts = o.get("ts_ms"); pid = o.get("pid")
             rss_kb = o.get("rss_kb")
             ut, st = o.get("utime"), o.get("stime")
-            if isinstance(ts, int) and isinstance(pid, int):
-                if isinstance(rss_kb, int):
-                    rss_out.write(json.dumps({"ts_ms": ts, "pid": pid, "rss_kb": rss_kb})+"\n")
-                key = pid
-                prev = last.get(key)
-                if prev and isinstance(ut, int) and isinstance(st, int):
-                    prev_ut, prev_st, prev_ts = prev
-                    # Only calculate CPU usage if timestamp is different (avoid duplicate timestamp issues)
-                    if ts != prev_ts:
-                        dt_ticks = max(0, (ut+st) - (prev_ut+prev_st))
-                        cpu_ms = int(dt_ticks * 1000 / max(1, CLK_TCK))
-                        dt_ms  = max(0, ts - prev_ts)
-                        cpu_out.write(json.dumps({"ts_ms": ts, "pid": pid, "cpu_ms": cpu_ms, "dt_ms": dt_ms})+"\n")
-                        # Update last only when we successfully process a different timestamp
-                        last[key] = (ut, st, ts)
-                    # If same timestamp, keep the latest values but don't calculate CPU usage
-                    elif ut + st > prev_ut + prev_st:
-                        last[key] = (ut, st, ts)
-                elif isinstance(ut, int) and isinstance(st, int):
-                    # First sample for this PID
-                    last[key] = (ut, st, ts)
-    print(f"[parse] copied proc_metrics and derived proc_cpu/proc_rss → {cctf_dir}")
+            if not isinstance(ts, int) or not isinstance(pid, int):
+                continue
+            # 计算差分 CPU
+            dt_ms = 0; cpu_ms = 0
+            prev = last.get(pid)
+            if prev and isinstance(ut, int) and isinstance(st, int):
+                prev_ut, prev_st, prev_ts = prev
+                if ts != prev_ts:
+                    dt_ticks = max(0, (ut+st) - (prev_ut+prev_st))
+                    dt_ms = max(0, ts - prev_ts)
+                    cpu_ms = int(dt_ticks * 1000 / max(1, CLK_TCK))
+                    last[pid] = (ut, st, ts)
+                elif ut + st > prev_ut + prev_st:
+                    last[pid] = (ut, st, ts)
+            elif isinstance(ut, int) and isinstance(st, int):
+                last[pid] = (ut, st, ts)
+            # 合并后的 CCTF 记录（首样本 dt/cpu 为 0 以占位）
+            rec = {"ts_ms": ts, "pid": pid, "dt_ms": int(dt_ms), "cpu_ms": int(cpu_ms)}
+            if isinstance(rss_kb, int):
+                rec["rss_kb"] = rss_kb
+            mout.write(json.dumps(rec) + "\n")
+    print(f"[parse] derived merged proc_metrics → {cctf_dir}")
 
-# ---------- 7) 复制/汇总新增制品（placement 与 system_stats） ----------
-for fname in ["placement_events.jsonl", "system_stats.jsonl"]:
-    src = LOGS / fname
-    if src.exists():
-        # 放到 cctf/ 下，保持与其它制品并列
-        (LOGS/"cctf").mkdir(exist_ok=True)
-        import shutil
-        shutil.copy(src, LOGS/"cctf"/fname)
-        print(f"[parse] copied {fname} → {LOGS/'cctf'/fname}")
+# ---------- 7) （精简）不再复制 placement/system_stats 到 CCTF ----------
 
 
 # ---------- 4) 复制客户端事件到 run 目录（若存在） ----------
@@ -200,44 +189,159 @@ if not ec_src.exists():
         (ROOT / "events_client.jsonl").replace(ec_src)
 print(f"[parse] client events at → {ec_src if ec_src.exists() else 'N/A'}")
 
-# ---------- 5) 生成 CCTF（标准化） ----------
+# ---------- 5) 生成 CCTF（精简产物 + 审计） ----------
 cctf_dir = LOGS / "cctf"; cctf_dir.mkdir(exist_ok=True)
-# 节点
+# 仅输出 nodes.json
 meta = json.load(open(LOGS / "node_meta.json", "r"))
+# Normalize freq and memory to reduce near-duplicates (e.g., 2399→2400 MHz; 15997MB→16GiB)
+raw_freq = meta.get("cpu_freq_mhz") or 0
+norm_freq = int(round(float(raw_freq) / 100.0) * 100) if raw_freq and raw_freq > 0 else raw_freq
+raw_mem_mb = meta.get("mem_mb") or 0
+norm_mem_mb = int(round(float(raw_mem_mb) / 1024.0) * 1024) if raw_mem_mb and raw_mem_mb > 0 else raw_mem_mb
 with open(cctf_dir / "nodes.json", "w") as f:
     json.dump([{
         "node_id": meta["node"],
         "stage": meta["stage"],
         "cpu_cores": meta["cpu_cores"],
-        "mem_mb": meta["mem_mb"],
+        "mem_mb": norm_mem_mb,
         "cpu_model": meta.get("cpu_model"),
-        "cpu_freq_mhz": meta.get("cpu_freq_mhz")
+        "cpu_freq_mhz": norm_freq
     }], f, indent=2)
-# 链路（单网卡示例）
-# If link_meta.json exists, carry BW/PR into CCTF link
-link_meta_path = LOGS / "link_meta.json"
-link_obj = {"u": meta["node"], "v": f'{meta["node"]}.net', "BW_bps": None, "PR_s": None}
-if link_meta_path.exists():
-    lm = json.load(open(link_meta_path, "r"))
-    if isinstance(lm, dict):
-        link_obj["BW_bps"] = lm.get("BW_bps")
-        link_obj["PR_s"] = lm.get("PR_s")
-with open(cctf_dir / "links.json", "w") as f:
-    json.dump([link_obj], f, indent=2)
-# 模块清单（若存在）
-mod_inv = LOGS / "module_inventory.json"
-if mod_inv.exists():
-    import shutil as _sh
-    _sh.copy(mod_inv, cctf_dir / "module_inventory.json")
-# 调用
-import shutil
-shutil.copy(merged_events, cctf_dir / "invocations.jsonl")
-# 主机指标
-shutil.copy(resources_out, cctf_dir / "host_metrics.jsonl")
-# 链路指标
-shutil.copy(links_out, cctf_dir / "link_metrics.jsonl")
-# 运行元数据（若存在）
-rm = LOGS/"run_meta.json"
-if rm.exists():
-    shutil.copy(rm, cctf_dir/"run_meta.json")
-print(f"[parse] CCTF → {cctf_dir}")
+# 仅输出精简字段的 invocations.jsonl（proc_metrics 已在步骤 6 生成）
+# 保留字段：trace_id、pid、ts_enqueue、ts_start、ts_end
+with open(merged_events, "r", encoding="utf-8", errors="ignore") as fin, \
+     open(cctf_dir / "invocations.jsonl", "w", encoding="utf-8") as fout:
+    for line in fin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            o = json.loads(line)
+        except Exception:
+            continue
+        rec = {
+            "trace_id": o.get("trace_id"),
+            "pid": o.get("pid"),
+            "ts_enqueue": o.get("ts_enqueue"),
+            "ts_start": o.get("ts_start"),
+            "ts_end": o.get("ts_end"),
+        }
+        fout.write(json.dumps(rec) + "\n")
+
+# 清理 CCTF 目录中非 {invocations.jsonl, proc_metrics.jsonl, nodes.json, audit_report.md} 的文件
+allowed = {"invocations.jsonl", "proc_metrics.jsonl", "nodes.json", "audit_report.md"}
+for p in cctf_dir.iterdir():
+    if p.is_file() and p.name not in allowed:
+        try:
+            p.unlink()
+        except Exception:
+            pass
+
+# 生成审计报告（英文）
+inv_path = cctf_dir / "invocations.jsonl"
+pm_path = cctf_dir / "proc_metrics.jsonl"
+audit_lines = []
+# 读取 invocations
+inv_rows = []
+if inv_path.exists():
+    with open(inv_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                inv_rows.append(json.loads(line))
+            except Exception:
+                pass
+# 读取 proc_metrics
+pm_rows = []
+if pm_path.exists():
+    with open(pm_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pm_rows.append(json.loads(line))
+            except Exception:
+                pass
+
+# 字段完整性与缺失率
+from collections import Counter, defaultdict
+inv_fields = ["trace_id","ts_enqueue","ts_start","ts_end","pid"]
+pm_fields = ["ts_ms","pid","dt_ms","cpu_ms","rss_kb"]  # rss_kb 可选
+inv_missing = Counter()
+pm_missing = Counter()
+for o in inv_rows:
+    for k in inv_fields:
+        if o.get(k) is None:
+            inv_missing[k] += 1
+for o in pm_rows:
+    for k in pm_fields:
+        if o.get(k) is None:
+            pm_missing[k] += 1
+
+# 时间单调性
+inv_violations = 0
+for o in inv_rows:
+    te, ts, td = o.get("ts_enqueue"), o.get("ts_start"), o.get("ts_end")
+    try:
+        if not (int(te) <= int(ts) <= int(td)):
+            inv_violations += 1
+    except Exception:
+        inv_violations += 1
+
+pm_monotonic_viol = 0
+pm_negative_dt = 0
+last_ts_by_pid = {}
+for o in pm_rows:
+    pid = o.get("pid")
+    ts = o.get("ts_ms")
+    dt = o.get("dt_ms")
+    if isinstance(dt, int) and dt < 0:
+        pm_negative_dt += 1
+    prev_ts = last_ts_by_pid.get(pid)
+    if prev_ts is not None and isinstance(ts, int):
+        if ts <= prev_ts:
+            pm_monotonic_viol += 1
+    if isinstance(ts, int):
+        last_ts_by_pid[pid] = ts
+
+# 交叉引用
+inv_pids = {int(o.get("pid")) for o in inv_rows if isinstance(o.get("pid"), int)}
+pm_pids = {int(o.get("pid")) for o in pm_rows if isinstance(o.get("pid"), int)}
+matched = inv_pids & pm_pids
+unmatched = inv_pids - pm_pids
+match_rate = (len(matched) / len(inv_pids)) if inv_pids else 0.0
+
+# 生成 Markdown 审计报告
+md = []
+md.append("# CCTF Audit Report\n")
+md.append(f"Node: {meta.get('node')}  |  Stage: {meta.get('stage')}\n")
+md.append("\n## Summary\n")
+md.append(f"Invocations: {len(inv_rows)}\n")
+md.append(f"Proc metrics samples: {len(pm_rows)}\n")
+md.append(f"Distinct PIDs (invocations): {len(inv_pids)}\n")
+md.append(f"Distinct PIDs (proc_metrics): {len(pm_pids)}\n")
+md.append(f"PID match rate: {match_rate:.2%}\n")
+md.append("\n## Field completeness (missing counts / rate)\n")
+for k in inv_fields:
+    miss = inv_missing.get(k, 0)
+    rate = (miss / len(inv_rows)) if inv_rows else 0
+    md.append(f"- invocations.{k}: {miss} ({rate:.2%})\n")
+for k in pm_fields:
+    miss = pm_missing.get(k, 0)
+    rate = (miss / len(pm_rows)) if pm_rows else 0
+    md.append(f"- proc_metrics.{k}: {miss} ({rate:.2%})\n")
+md.append("\n## Temporal consistency\n")
+md.append(f"- invocations ts_enqueue ≤ ts_start ≤ ts_end violations: {inv_violations}\n")
+md.append(f"- proc_metrics per-pid strictly increasing ts_ms violations: {pm_monotonic_viol}\n")
+md.append(f"- proc_metrics records with dt_ms < 0: {pm_negative_dt}\n")
+md.append("\n## Cross-reference\n")
+md.append(f"- invocations without matching proc_metrics PID: {len(unmatched)}\n")
+if unmatched:
+    sample = list(sorted(unmatched))[:10]
+    md.append(f"  sample unmatched PIDs: {sample}\n")
+
+(cctf_dir / "audit_report.md").write_text("".join(md), encoding="utf-8")
+print(f"[parse] CCTF (slim) → {cctf_dir}; audit_report.md generated")

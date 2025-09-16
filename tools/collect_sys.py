@@ -76,10 +76,30 @@ def write_node_meta() -> None:
             cpu_model = subprocess.check_output(["bash", "-lc", "grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ //'"], text=True).strip()
         except Exception:
             cpu_model = ""
-    try:
-        cpu_mhz_str = subprocess.check_output(["bash", "-lc", "lscpu | awk -F: '/CPU max MHz/ {sub(/^ +/,\"\",$2); print int($2); exit}'"], text=True).strip()
-        cpu_mhz = int(cpu_mhz_str) if cpu_mhz_str else 0
-    except Exception:
+    # Prefer explicit override via env
+    env_mhz = os.getenv("CPU_FREQ_MHZ")
+    cpu_mhz = 0
+    if env_mhz:
+        try:
+            cpu_mhz = int(float(env_mhz))
+        except Exception:
+            cpu_mhz = 0
+    # Try lscpu CPU max MHz first
+    if cpu_mhz <= 0:
+        try:
+            cpu_mhz_str = subprocess.check_output(["bash", "-lc", "lscpu | awk -F: '/CPU max MHz/ {sub(/^ +/,\"\",$2); print $2; exit}'"], text=True).strip()
+            cpu_mhz = int(float(cpu_mhz_str)) if cpu_mhz_str else 0
+        except Exception:
+            cpu_mhz = 0
+    # Fallback to current CPU MHz from lscpu (often stable on KVM/QEMU VMs)
+    if cpu_mhz <= 0:
+        try:
+            cpu_mhz_str2 = subprocess.check_output(["bash", "-lc", "lscpu | awk -F: '/^CPU MHz:/ {sub(/^ +/,\"\",$2); print $2; exit}'"], text=True).strip()
+            cpu_mhz = int(float(cpu_mhz_str2)) if cpu_mhz_str2 else 0
+        except Exception:
+            cpu_mhz = 0
+    # Final fallback: /proc/cpuinfo
+    if cpu_mhz <= 0:
         try:
             cpu_mhz = int(float(subprocess.check_output(["bash", "-lc", "awk -F: '/cpu MHz/ {gsub(/^ +/,\"\",$2); print $2; exit}' /proc/cpuinfo"], text=True).strip()))
         except Exception:

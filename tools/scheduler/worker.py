@@ -113,13 +113,18 @@ def main():
 
     signal.signal(signal.SIGINT, handle_sigint)
 
-    # CPU core pool for cpuset rotation (optional). Detect 4 cores and parallel=2 -> [0-1, 2-3]
+    # CPU core pools for cpuset injection (works regardless of parallel)
     total_cores = psutil.cpu_count(logical=True) or 1
-    core_sets = []
-    if args.parallel >= 2 and total_cores >= 4:
-        core_sets = [(0, 1), (2, 3)]
-    elif args.parallel >= 2 and total_cores == 2:
-        core_sets = [(0, 1), (0, 1)]
+    # Precompute rotation groups for 1c/2c/4c (contiguous blocks); fallback to clamp if not enough cores
+    groups_1c = [[i] for i in range(total_cores)] if total_cores >= 1 else [[0]]
+    if total_cores >= 2:
+        groups_2c = [[i, i+1] for i in range(0, total_cores-1, 2)]
+    else:
+        groups_2c = [[0]]
+    if total_cores >= 4:
+        groups_4c = [list(range(i, min(total_cores, i+4))) for i in range(0, total_cores, 4)]
+    else:
+        groups_4c = [list(range(0, min(total_cores, 4)))]
 
     # Simple thread pool
     from queue import Queue
@@ -145,11 +150,29 @@ def main():
         # If task specifies cpuset explicitly, honor it
         if task.get("cpuset"):
             return str(task["cpuset"])
-        # Otherwise, if we have predefined core sets and the task advertises cpu_units
-        if core_sets and int(task.get("cpu_units", 2)) >= 2:
-            a, b = core_sets[slot_idx % len(core_sets)]
-            return f"{a}-{b}"
-        return None
+        # Decide based on requested cpu_units (strict core cap via cpuset)
+        try:
+            units = int(task.get("cpu_units", 1))
+        except Exception:
+            units = 1
+        units = max(1, units)
+        if total_cores <= 0:
+            return None
+        if units >= total_cores:
+            # Clamp to all cores
+            return f"0-{max(0, total_cores-1)}"
+        if units == 1:
+            grp = groups_1c[slot_idx % len(groups_1c)]
+            return ",".join(str(x) for x in grp)
+        if units == 2:
+            grp = groups_2c[slot_idx % len(groups_2c)]
+            return f"{grp[0]}-{grp[-1]}"
+        if units == 4:
+            grp = groups_4c[slot_idx % len(groups_4c)]
+            return f"{grp[0]}-{grp[-1]}"
+        # Generic fallback: contiguous block from 0 of length 'units'
+        end = min(total_cores, units) - 1
+        return f"0-{end}"
 
     def worker_loop(slot_idx: int):
         while not STOP.is_set():
