@@ -131,7 +131,7 @@ def main():
     ap.add_argument("--pending-max", type=int, default=6, help="Max length of q:pending; used by fifo mode")
     ap.add_argument("--pending-mode", choices=["pulse", "fifo"], default="pulse", help="pending submission mode: pulse (default) or fifo")
     ap.add_argument("--pulse-size", type=int, default=10, help="Tasks per pulse when pending-mode=pulse")
-    ap.add_argument("--pulse-interval", type=float, default=100.0, help="Seconds between pulses when pending-mode=pulse")
+    ap.add_argument("--pulse-interval", type=float, default=300.0, help="Seconds between pulses when pending-mode=pulse")
     # Dribble mode options (non-pending or online modes)
     ap.add_argument("--drip", action="store_true", help="Enable dribble (small-batch) enqueue loop")
     ap.add_argument("--batch-size", type=int, default=1)
@@ -304,6 +304,9 @@ def main():
                     total += 1
                     sent += 1
                     idx += 1
+                    # Stagger within a pulse: space tasks by ~1s instead of same timestamp
+                    if sent < max(1, args.pulse_size) and idx < len(global_list):
+                        time.sleep(1.0)
                 print(f"[pending-pulse] enqueued pulse={sent}, total={total}")
                 if idx < len(global_list):
                     time.sleep(max(0.0, args.pulse_interval))
