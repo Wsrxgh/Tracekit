@@ -4,7 +4,7 @@ Worker: pulls tasks from per-node queue q:<NODE_ID> and runs ffmpeg via wrapper.
 No scheduling events are logged. Only ffmpeg completion is appended by the wrapper.
 """
 from __future__ import annotations
-import argparse, os, sys, json, shlex, subprocess, signal, threading, socket, psutil
+import argparse, os, sys, json, shlex, subprocess, signal, threading, socket, psutil, time
 from pathlib import Path
 import redis
 
@@ -60,6 +60,8 @@ def run_task(task: dict, root: Path) -> int:
         env["CPU_QUOTA"] = str(task["cpu_quota"])  # percent, e.g., 200
     if task.get("cpu_weight"):
         env["CPU_WEIGHT"] = str(task["cpu_weight"])  # systemd CPUWeight for shared mode
+    if task.get("unit_name"):
+        env["UNIT_NAME"] = str(task["unit_name"])
     # RUN_ID passthrough if defined
     if os.getenv("RUN_ID"):
         env["RUN_ID"] = os.getenv("RUN_ID")
@@ -190,6 +192,44 @@ def main():
         end = min(total_cores, units) - 1
         return f"0-{end}"
 
+    # ----- Shared-mode Max-Min Fairness helpers -----
+    active_units = {}
+    au_lock = threading.Lock()
+
+    def _sanitize_unit_component(s: str) -> str:
+        return "".join(c if c.isalnum() or c in "-_." else "-" for c in s)
+
+    def gen_unit_name(slot_idx: int) -> str:
+        ts = int(time.time() * 1000)
+        base = _sanitize_unit_component(node)
+        return f"tk-{base}-{ts}-{slot_idx}.scope"
+
+    def waterfill_lambda(reqs, C: float) -> float:
+        try:
+            C = max(0.0, float(C))
+            a = sorted(max(0.0, float(x)) for x in reqs)
+        except Exception:
+            return 0.0
+        n = len(a)
+        if n <= 0:
+            return 0.0
+        prefix = 0.0
+        for k in range(n):
+            remaining = n - k
+            lam = (C - prefix) / remaining if remaining > 0 else 0.0
+            if lam <= a[k]:
+                return max(0.0, lam)
+            prefix += a[k]
+        return a[-1]
+
+    def compute_shares_map(units_map: dict, C: float) -> dict:
+        # units_map: unit_name -> requested vCPUs (r_i)
+        if not units_map:
+            return {}
+        lam = waterfill_lambda(units_map.values(), C)
+        return {u: min(max(0.0, float(r)), lam) for u, r in units_map.items()}
+
+
     def worker_loop(slot_idx: int):
         while not STOP.is_set():
             try:
@@ -198,18 +238,46 @@ def main():
                 continue
             try:
                 # Inject CPU controls depending on binding mode
+                unit_name = None
                 if args.cpu_binding == "exclusive":
                     # Inject cpuset dynamically if not set
                     dyn_cpuset = next_cpuset_for(t, slot_idx)
                     if dyn_cpuset and not t.get("cpuset"):
                         t["cpuset"] = dyn_cpuset
-                else:  # shared mode: no cpuset; inject CPU_WEIGHT for fair sharing
+                else:
+                    # shared mode: Max-Min Fairness via dynamic CPUQuota; also keep CPU_WEIGHT as soft hint
                     try:
                         units = int(t.get("cpu_units", 1))
                     except Exception:
                         units = 1
+                    units = max(1, units)
                     t.pop("cpuset", None)
-                    t["cpu_weight"] = max(1, int(args.cpuweight_per_vcpu) * max(1, units))
+                    t["cpu_weight"] = max(1, int(args.cpuweight_per_vcpu) * units)
+                    # Generate a stable scope unit name for this ffmpeg so we can adjust quota later
+                    unit_name = gen_unit_name(slot_idx)
+                    t["unit_name"] = unit_name
+                    # Compute water-filling shares including this new task, then:
+                    # - apply new CPUQuota to existing units via systemctl set-property
+                    # - pass initial CPU_QUOTA to the new task's env (wrapper will start it with that quota)
+                    with au_lock:
+                        # Build a temp map including the new unit
+                        temp_units = dict(active_units)
+                        temp_units[unit_name] = units
+                        shares = compute_shares_map(temp_units, total_cores)
+                        # Apply to existing units
+                        for u, share in shares.items():
+                            if u == unit_name:
+                                continue
+                            quota_pct = max(1, int(round(share * 100.0)))
+                            try:
+                                subprocess.call(["systemctl", "set-property", u, f"CPUQuota={quota_pct}%"],
+                                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            except Exception:
+                                pass
+                        # Set initial quota for the new unit (wrapper will read env CPU_QUOTA)
+                        t["cpu_quota"] = max(1, int(round(shares.get(unit_name, units) * 100.0)))
+                        # Register new unit as active
+                        active_units[unit_name] = units
                 rc = run_task(t, root)
                 if rc != 0:
                     print(f"task failed rc={rc}: {t}", file=sys.stderr)
@@ -221,6 +289,24 @@ def main():
                     units = int(t.get("cpu_units", 1))
                 except Exception:
                     units = 1
+                # Fairness: on completion, recompute and apply quotas for remaining units (shared mode)
+                if args.cpu_binding == "shared":
+                    try:
+                        u_name = t.get("unit_name")
+                        with au_lock:
+                            if u_name:
+                                active_units.pop(u_name, None)
+                            if active_units:
+                                shares = compute_shares_map(active_units, total_cores)
+                                for u, share in shares.items():
+                                    quota_pct = max(1, int(round(share * 100.0)))
+                                    try:
+                                        subprocess.call(["systemctl", "set-property", u, f"CPUQuota={quota_pct}%"],
+                                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
                 # increment capacity back
                 try:
                     cap_key = f"cap:{node}"

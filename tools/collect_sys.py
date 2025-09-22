@@ -22,7 +22,15 @@ STAGE = os.getenv("STAGE", "cloud")
 VM_IP = os.getenv("VM_IP", "127.0.0.1")
 IFACE = os.getenv("IFACE", "")
 PROC_MATCH = os.getenv("PROC_MATCH", "python|uvicorn|gunicorn|ffmpeg|onnx|onnxruntime|java|node|nginx|torchserve")
-PROC_INTERVAL_MS = int(os.getenv("PROC_INTERVAL_MS", "200"))
+
+def _getenv_int(name: str, default: int) -> int:
+    val = os.getenv(name, None)
+    try:
+        return int(val) if (val is not None and str(val).strip() != "") else int(default)
+    except Exception:
+        return int(default)
+
+PROC_INTERVAL_MS = _getenv_int("PROC_INTERVAL_MS", 200)
 PROC_PID_DIR = os.getenv("PROC_PID_DIR", "")
 PROC_REFRESH = os.getenv("PROC_REFRESH", "1")
 STOP_ALL = os.getenv("STOP_ALL", "0")

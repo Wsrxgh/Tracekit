@@ -81,6 +81,54 @@ Tracekit provides multi-layer observability for cloud applications:
 - Noise distribution: 1/3 no noise, 1/3 low noise, 1/3 medium noise across different patterns
 - .gitignore ignores inputs/ffmpeg/
 
+
+### CPU overprovisioning and CPU binding modes (NEW)
+
+This release adds admission-side CPU overprovisioning and execution-side CPU binding modes while preserving the original scheduler.
+
+Key flags on worker (tools/scheduler/worker.py):
+- --allocation-ratio FLOAT
+  - Overprovisioning factor for admission/capacity. Effective capacity units (cap) = capacity-units if explicitly set, otherwise floor(allocation-ratio × logical_cores).
+  - Default: 1.0 (no overprovisioning).
+- --cpu-binding {exclusive,shared}
+  - exclusive: strict core binding (cpuset) per task based on cpu_units (baseline behavior).
+  - shared: no cpuset; uses Linux CFS weight via systemd-run CPUWeight to share CPU proportionally to cpu_units.
+  - Default: exclusive.
+- --parallel INT
+  - >0: use slot tokens + capacity gating (original behavior). 0 or not provided: CAP-ONLY mode (no slots); central scheduler dispatches purely by remaining cap:<node>.
+  - Default: 0 (cap-only). For legacy behavior, set a positive --parallel.
+- --capacity-units INT
+  - Overrides capacity calculation if set (use with care; otherwise prefer --allocation-ratio).
+- --cpuweight-per-vcpu INT
+  - When cpu-binding=shared, sets CPUWeight = cpuweight-per-vcpu × cpu_units. Default: 100 (1c=100, 2c=200, 4c=400).
+
+Recipes:
+- Strict capacity + exclusive pinning (baseline)
+  ```bash
+  # On each worker (example values)
+  python3 tools/scheduler/worker.py \
+    --outputs outputs \
+    --redis "redis://:Wsr123@<controller_ip>:6379/0" \
+    --parallel 4 \
+    --allocation-ratio 1.0 \
+    --cpu-binding exclusive
+  ```
+- 1.5× overprovisioning + shared fair-sharing (no core pinning) + cap-only dispatch
+  ```bash
+  # On each worker (do NOT pass --parallel)
+  python3 tools/scheduler/worker.py \
+    --outputs outputs \
+    --redis "redis://:Wsr123@<controller_ip>:6379/0" \
+    --allocation-ratio 1.5 \
+    --cpu-binding shared
+  ```
+
+Notes:
+- In shared mode, if systemd-run is available, ffmpeg processes are launched in a scope with CPUWeight (and optional CPUQuota if provided by the task). If systemd-run is unavailable, tasks still run without cpuset binding (best-effort fair sharing by the OS).
+- In exclusive mode, worker injects cpuset per task unless the task already specifies a cpuset (then it is honored).
+- Central scheduler is unchanged. If no slot tokens exist (because workers didn’t register any by leaving --parallel unset/0), the scheduler automatically dispatches by remaining cap only.
+- Dispatcher flags are unchanged; task cpu_units from profiles keep their meaning in both modes.
+
 ---
 
 ## End-to-end multi-node trace collection test (current flow)

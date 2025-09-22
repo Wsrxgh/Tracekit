@@ -43,9 +43,22 @@ set +e
 LAUNCH=()
 SYS_PROPS=()
 if command -v systemd-run >/dev/null 2>&1; then
+  # Always enable CPUAccounting so CPUQuota/CPUWeight are meaningful
+  SYS_PROPS+=( -p CPUAccounting=1 )
   if [ -n "${CPU_QUOTA:-}" ]; then SYS_PROPS+=( -p CPUQuota=${CPU_QUOTA}% ); fi
   if [ -n "${CPU_WEIGHT:-}" ]; then SYS_PROPS+=( -p CPUWeight=${CPU_WEIGHT} ); fi
-  if [ ${#SYS_PROPS[@]} -gt 0 ]; then LAUNCH+=( systemd-run --scope "${SYS_PROPS[@]}" ); fi
+  if [ ${#SYS_PROPS[@]} -gt 0 ]; then
+    # Preflight without binding to a specific unit name
+    if systemd-run --scope "${SYS_PROPS[@]}" -- true >/dev/null 2>&1; then
+      if [ -n "${UNIT_NAME:-}" ]; then
+        LAUNCH+=( systemd-run --scope --unit="${UNIT_NAME}" "${SYS_PROPS[@]}" )
+      else
+        LAUNCH+=( systemd-run --scope "${SYS_PROPS[@]}" )
+      fi
+    else
+      echo "systemd-run scope not permitted (CPUWeight/CPUQuota); running without systemd-run" >&2
+    fi
+  fi
 fi
 if [ -n "${CPUSET:-}" ] && command -v taskset >/dev/null 2>&1; then
   LAUNCH+=( taskset -c "${CPUSET}" )
