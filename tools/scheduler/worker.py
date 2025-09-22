@@ -58,6 +58,8 @@ def run_task(task: dict, root: Path) -> int:
         env["CPUSET"] = str(task["cpuset"])
     if task.get("cpu_quota"):
         env["CPU_QUOTA"] = str(task["cpu_quota"])  # percent, e.g., 200
+    if task.get("cpu_weight"):
+        env["CPU_WEIGHT"] = str(task["cpu_weight"])  # systemd CPUWeight for shared mode
     # RUN_ID passthrough if defined
     if os.getenv("RUN_ID"):
         env["RUN_ID"] = os.getenv("RUN_ID")
@@ -69,9 +71,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--outputs", default="outputs")
     ap.add_argument("--redis", default="redis://localhost:6379/0")
-    ap.add_argument("--parallel", type=int, default=1)
+    ap.add_argument("--parallel", type=int, default=0)
     ap.add_argument("--slots-key", default="slots:available")
     ap.add_argument("--capacity-units", type=int, default=0, help="Total CPU capacity units for this worker (default: logical cores)")
+    ap.add_argument("--allocation-ratio", type=float, default=1.0, help="Overprovision ratio; cap defaults to floor(ratio * logical_cores) when capacity-units not set")
+    ap.add_argument("--cpu-binding", choices=["exclusive", "shared"], default="exclusive", help="exclusive: inject cpuset; shared: inject CPUWeight, no cpuset")
+    ap.add_argument("--cpuweight-per-vcpu", type=int, default=100, help="CPUWeight per vCPU when --cpu-binding=shared (systemd CFS weight)")
     args = ap.parse_args()
 
     # Ensure psutil is available early
@@ -95,19 +100,29 @@ def main():
 
     # Initialize concurrency slots and CPU capacity counter
     try:
-        # Concurrency slots: at most 'parallel' concurrent tasks
-        for _ in range(max(0, args.parallel)):
-            r.rpush(args.slots_key, node)
-        # CPU capacity units: default to logical cores if not provided
+        # Concurrency slots: only if parallel>0 (else rely solely on capacity)
+        if args.parallel and args.parallel > 0:
+            for _ in range(args.parallel):
+                r.rpush(args.slots_key, node)
+        # CPU capacity units: default to floor(allocation_ratio * logical cores) if not provided
         total_cores = psutil.cpu_count(logical=True) or 1
-        cap_units = args.capacity_units if args.capacity_units and args.capacity_units > 0 else total_cores
+        if args.capacity_units and args.capacity_units > 0:
+            cap_units = int(args.capacity_units)
+        else:
+            cap_units = max(1, int((args.allocation_ratio if args.allocation_ratio and args.allocation_ratio > 0 else 1.0) * total_cores))
         cap_key = f"cap:{node}"
         # Set only if absent to avoid clobbering during restarts with running tasks
         try:
             r.setnx(cap_key, cap_units)
+            # Record physical cores and ratio for reference/monitoring
+            try:
+                r.set(f"phys:{node}", total_cores)
+                r.set(f"ratio:{node}", args.allocation_ratio if args.allocation_ratio else 1.0)
+            except Exception:
+                pass
         except Exception:
             pass
-        print(f"registered slots={args.parallel}, capacity_units={cap_units} for node={node}")
+        print(f"registered slots={args.parallel}, capacity_units={cap_units}, phys_cores={total_cores}, ratio={args.allocation_ratio} for node={node}")
     except Exception as e:
         print("failed to register slots/capacity:", e, file=sys.stderr)
 
@@ -128,7 +143,8 @@ def main():
 
     # Simple thread pool
     from queue import Queue
-    task_q: Queue[dict] = Queue(maxsize=args.parallel * 2)
+    # If parallel<=0, allow unbounded queue; else small multiple
+    task_q: Queue[dict] = Queue(maxsize=0 if (not args.parallel or args.parallel <= 0) else args.parallel * 2)
 
     def fetch_loop():
         while not STOP.is_set():
@@ -181,10 +197,19 @@ def main():
             except Exception:
                 continue
             try:
-                # Inject cpuset dynamically if not set
-                dyn_cpuset = next_cpuset_for(t, slot_idx)
-                if dyn_cpuset and not t.get("cpuset"):
-                    t["cpuset"] = dyn_cpuset
+                # Inject CPU controls depending on binding mode
+                if args.cpu_binding == "exclusive":
+                    # Inject cpuset dynamically if not set
+                    dyn_cpuset = next_cpuset_for(t, slot_idx)
+                    if dyn_cpuset and not t.get("cpuset"):
+                        t["cpuset"] = dyn_cpuset
+                else:  # shared mode: no cpuset; inject CPU_WEIGHT for fair sharing
+                    try:
+                        units = int(t.get("cpu_units", 1))
+                    except Exception:
+                        units = 1
+                    t.pop("cpuset", None)
+                    t["cpu_weight"] = max(1, int(args.cpuweight_per_vcpu) * max(1, units))
                 rc = run_task(t, root)
                 if rc != 0:
                     print(f"task failed rc={rc}: {t}", file=sys.stderr)
@@ -202,17 +227,20 @@ def main():
                     r.incrby(cap_key, max(1, units))
                 except Exception as e:
                     print("failed to return capacity:", e, file=sys.stderr)
-                # return one concurrency slot
-                try:
-                    r.rpush(args.slots_key, node)
-                except Exception as e:
-                    print("failed to return slot:", e, file=sys.stderr)
+                # return one concurrency slot (only if slots are used)
+                if args.parallel and args.parallel > 0:
+                    try:
+                        r.rpush(args.slots_key, node)
+                    except Exception as e:
+                        print("failed to return slot:", e, file=sys.stderr)
                 task_q.task_done()
 
     fetch_t = threading.Thread(target=fetch_loop, daemon=True)
     fetch_t.start()
 
-    workers = [threading.Thread(target=lambda idx=i: worker_loop(idx), daemon=True) for i in range(args.parallel)]
+    # Determine worker thread count: if parallel<=0, use cap_units threads; else use parallel
+    num_threads = args.parallel if (args.parallel and args.parallel > 0) else max(1, cap_units)
+    workers = [threading.Thread(target=lambda idx=i: worker_loop(idx), daemon=True) for i in range(num_threads)]
     for th in workers: th.start()
 
     try:

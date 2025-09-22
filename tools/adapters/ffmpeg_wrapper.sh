@@ -39,13 +39,16 @@ if [ -z "${TRACE_ID:-}" ]; then
   if command -v uuidgen >/dev/null 2>&1; then TRACE_ID=$(uuidgen); else TRACE_ID=$(date +%s%N); fi
 fi
 set +e
-# Optional CPU limits: CPUSET="0-1" to pin cores; CPU_QUOTA=200 to cap at 200%
+# Optional CPU limits: CPUSET="0-1" to pin cores; CPU_QUOTA=200 to cap at 200%; CPU_WEIGHT for CFS weight
 LAUNCH=()
-if [ -n "${CPU_QUOTA:-}" ] && command -v systemd-run >/dev/null 2>&1; then
-  LAUNCH+=(systemd-run --scope -p CPUQuota=${CPU_QUOTA}%)
+SYS_PROPS=()
+if command -v systemd-run >/dev/null 2>&1; then
+  if [ -n "${CPU_QUOTA:-}" ]; then SYS_PROPS+=( -p CPUQuota=${CPU_QUOTA}% ); fi
+  if [ -n "${CPU_WEIGHT:-}" ]; then SYS_PROPS+=( -p CPUWeight=${CPU_WEIGHT} ); fi
+  if [ ${#SYS_PROPS[@]} -gt 0 ]; then LAUNCH+=( systemd-run --scope "${SYS_PROPS[@]}" ); fi
 fi
 if [ -n "${CPUSET:-}" ] && command -v taskset >/dev/null 2>&1; then
-  LAUNCH+=(taskset -c "${CPUSET}")
+  LAUNCH+=( taskset -c "${CPUSET}" )
 fi
 "${LAUNCH[@]}" ffmpeg "$@" &
 FFPID=$!

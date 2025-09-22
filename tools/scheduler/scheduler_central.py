@@ -51,7 +51,51 @@ def main():
             # Snapshot available slots non-blocking and build token counts per node
             n = r.llen(args.slots) or 0
             if n <= 0:
-                time.sleep(0.05)
+                # No slots gating: dispatch purely by remaining CPU capacity (cap:<node>)
+                try:
+                    cap_keys = r.keys("cap:*") or []
+                except Exception:
+                    cap_keys = []
+                hosts = []
+                for k in cap_keys:
+                    try:
+                        s = k.decode("utf-8")
+                        if s.startswith("cap:"):
+                            hosts.append(s[4:])
+                    except Exception:
+                        continue
+                hosts = sorted(set(hosts))
+                chosen = None
+                for nid in hosts:
+                    try:
+                        cap_free = int(r.get(f"cap:{nid}") or 0)
+                    except Exception:
+                        cap_free = 0
+                    if cap_free >= need:
+                        chosen = nid
+                        break
+                if not chosen:
+                    # Head-of-line blocking by capacity
+                    time.sleep(0.05)
+                    continue
+                # Dispatch without consuming a slot token
+                cap_key = f"cap:{chosen}"
+                try:
+                    cap_free = int(r.get(cap_key) or 0)
+                except Exception:
+                    cap_free = 0
+                if cap_free < need:
+                    time.sleep(0.05)
+                    continue
+                new_free = cap_free - need
+                r.set(cap_key, new_free)
+                r.lpop(args.pending)
+                qnode = f"q:{chosen}"
+                r.rpush(qnode, task_raw)
+                try:
+                    print(f"dispatch(no-slots) -> node={chosen} input={tpeek.get('input')} output={tpeek.get('output')} cpu_units={need} cap_left={new_free}")
+                except Exception:
+                    print(f"dispatch(no-slots) -> node={chosen} raw_task={task_raw[:80]!r}")
                 continue
             # Limit scan by --scan-slots if set (>0)
             max_scan = n if int(args.scan_slots) <= 0 else min(n, int(args.scan_slots))
