@@ -123,6 +123,96 @@ Recipes:
     --cpu-binding shared
   ```
 
+
+### Robustness against stale Redis state (NEW)
+
+To avoid occasional deadlocks caused by stale Redis keys left from previous runs:
+- Worker startup now purges old slot tokens for itself from `slots:available` automatically.
+- Optional flags on worker:
+  - `--reset-capacity`: Force reset `cap:<node>` to the current computed capacity on startup (override stale values)
+  - `--clear-queue`: Delete `q:<node>` on startup for a clean run (use only in testing)
+- Central scheduler fallback: even if `slots:available` contains leftover tokens, the scheduler will fall back to capacity-only dispatch when no feasible token can be used. This prevents blocking on stale tokens.
+
+### Quick test flow (sudo workers + shared fair-sharing + pending pulse)
+
+Use this when you want Max-Min fairness (shared mode with dynamic CPUQuota) and a robust, repeatable run.
+
+1) On ALL workers (start collectors first, then workers with sudo)
+```bash
+cd ~/Tracekit && source run_id.env
+USE_PY_COLLECT=1 STOP_ALL=1 make stop-collect RUN_ID=$RUN_ID || true; pkill -f tools/scheduler/worker.py || true
+rm -rf outputs/* logs/$RUN_ID/pids || true; mkdir -p logs/$RUN_ID/pids
+USE_PY_COLLECT=1 PROC_SAMPLING=1 PROC_REFRESH=1 PROC_INTERVAL_MS=1000 \
+  PROC_PID_DIR=logs/$RUN_ID/pids PROC_MATCH='^ffmpeg$|^ffprobe$' \
+  make start-collect RUN_ID=$RUN_ID STAGE=cloud VM_IP=<controller_ip>
+
+sudo -E RUN_ID=$RUN_ID python3 tools/scheduler/worker.py \
+  --outputs outputs \
+  --allocation-ratio 1.5 \
+  --cpu-binding shared \
+  --reset-capacity \
+  --clear-queue \
+  --redis "redis://:Wsr123@<controller_ip>:6379/0"
+```
+Notes:
+- `sudo -E` preserves RUN_ID and enables setting CPUQuota/CPUWeight.
+- `--reset-capacity` avoids stale `cap:<node>`; `--clear-queue` ensures q:<node> is empty before a new test.
+
+2) On controller (clean + start central + enqueue pulses)
+```bash
+cd ~/Tracekit && source run_id.env
+pkill -f tools/scheduler/scheduler_central.py || true; pkill -f tools/scheduler/dispatcher.py || true
+redis-cli -a 'Wsr123' -h <controller_ip> DEL q:pending slots:available || true
+for n in $(printf "%s\n" $(hostname) cloud0gxie cloud1gxie cloud2gxie cloud3gxie); do
+  redis-cli -a 'Wsr123' -h <controller_ip> DEL q:$n >/dev/null 2>&1 || true;
+  redis-cli -a 'Wsr123' -h <controller_ip> SET cap:$n 6 >/dev/null 2>&1 || true;
+done
+mkdir -p "logs/$RUN_ID"
+nohup python3 tools/scheduler/scheduler_central.py --redis "redis://:Wsr123@<controller_ip>:6379/0" > "logs/$RUN_ID/central.log" 2>&1 &
+
+python3 tools/scheduler/dispatcher.py \
+  --inputs inputs/ffmpeg \
+  --outputs outputs \
+  --pending --pending-mode pulse --pulse-size 10 --pulse-interval 100 \
+  --mix "fast1080p=2,medium480p=3,hevc1080p=2,light1c=3" --total 20 --seed 20250901 \
+  --redis "redis://:Wsr123@<controller_ip>:6379/0"
+```
+
+3) Stop collectors and parse (each worker)
+```bash
+cd ~/Tracekit && source run_id.env
+make stop-collect RUN_ID=$RUN_ID && make parse RUN_ID=$RUN_ID
+```
+
+
+### Host weigher (optional)
+
+Central scheduler can optionally choose among multiple feasible hosts using a weigher instead of pure first-fit.
+
+Flags:
+- `--weigher`: "" (default first-fit), `instances`, or `vcpu`
+  - `instances`: prefers hosts by the number of running tasks (run_count:<node>)
+  - `vcpu`: prefers hosts by used vCPU = cap_total:<node> - cap:<node>
+- `--weigher-order`: `min` or `max`
+  - `min`: prefer smaller metric (e.g., fewer running tasks or lower used vCPU)
+  - `max`: prefer larger metric
+
+Notes:
+- Only hosts that are FEASIBLE for the head task are considered (i.e., cap:<node> ≥ task.cpu_units and, in slots mode, the host must also have a slot token).
+- Weigher affects tie-breaking across hosts; admission still obeys Strict FIFO on q:pending.
+
+Examples:
+```bash
+python3 tools/scheduler/scheduler_central.py \
+  --weigher instances --weigher-order min \
+  --redis "redis://:Wsr123@<controller_ip>:6379/0"
+```
+```bash
+python3 tools/scheduler/scheduler_central.py \
+  --weigher vcpu --weigher-order min \
+  --redis "redis://:Wsr123@<controller_ip>:6379/0"
+```
+
 Notes:
 - In shared mode, if systemd-run is available, ffmpeg processes are launched in a scope with CPUWeight (and optional CPUQuota if provided by the task). If systemd-run is unavailable, tasks still run without cpuset binding (best-effort fair sharing by the OS).
 - In exclusive mode, worker injects cpuset per task unless the task already specifies a cpuset (then it is honored).

@@ -79,6 +79,8 @@ def main():
     ap.add_argument("--allocation-ratio", type=float, default=1.0, help="Overprovision ratio; cap defaults to floor(ratio * logical_cores) when capacity-units not set")
     ap.add_argument("--cpu-binding", choices=["exclusive", "shared"], default="exclusive", help="exclusive: inject cpuset; shared: inject CPUWeight, no cpuset")
     ap.add_argument("--cpuweight-per-vcpu", type=int, default=100, help="CPUWeight per vCPU when --cpu-binding=shared (systemd CFS weight)")
+    ap.add_argument("--reset-capacity", action="store_true", help="Force reset cap:<node> to current computed capacity on startup (override stale state)")
+    ap.add_argument("--clear-queue", action="store_true", help="Delete q:<node> on startup (useful for clean tests)")
     args = ap.parse_args()
 
     # Ensure psutil is available early
@@ -102,6 +104,17 @@ def main():
 
     # Initialize concurrency slots and CPU capacity counter
     try:
+        # Purge stale slot tokens for this node to avoid central blocking on leftovers
+        try:
+            r.lrem(args.slots_key, 0, node)
+        except Exception:
+            pass
+        # Optionally clear this node's queue for clean tests
+        if args.clear_queue:
+            try:
+                r.delete(qname)
+            except Exception:
+                pass
         # Concurrency slots: only if parallel>0 (else rely solely on capacity)
         if args.parallel and args.parallel > 0:
             for _ in range(args.parallel):
@@ -113,15 +126,22 @@ def main():
         else:
             cap_units = max(1, int((args.allocation_ratio if args.allocation_ratio and args.allocation_ratio > 0 else 1.0) * total_cores))
         cap_key = f"cap:{node}"
-        # Set only if absent to avoid clobbering during restarts with running tasks
+        # Reset or set if absent
         try:
-            r.setnx(cap_key, cap_units)
+            if args.reset_capacity:
+                r.set(cap_key, cap_units)
+            else:
+                r.setnx(cap_key, cap_units)
             # Record physical cores and ratio for reference/monitoring
             try:
                 r.set(f"phys:{node}", total_cores)
                 r.set(f"ratio:{node}", args.allocation_ratio if args.allocation_ratio else 1.0)
             except Exception:
                 pass
+        except Exception:
+            pass
+        try:
+            r.set(f"cap_total:{node}", cap_units)
         except Exception:
             pass
         print(f"registered slots={args.parallel}, capacity_units={cap_units}, phys_cores={total_cores}, ratio={args.allocation_ratio} for node={node}")
@@ -319,6 +339,17 @@ def main():
                         r.rpush(args.slots_key, node)
                     except Exception as e:
                         print("failed to return slot:", e, file=sys.stderr)
+                # decrement running-instance counter (clamp to >=0)
+                try:
+                    v = r.decrby(f"run_count:{node}", 1)
+                    try:
+                        v = int(v)
+                    except Exception:
+                        v = 0
+                    if v is not None and v < 0:
+                        r.set(f"run_count:{node}", 0)
+                except Exception:
+                    pass
                 task_q.task_done()
 
     fetch_t = threading.Thread(target=fetch_loop, daemon=True)
