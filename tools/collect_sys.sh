@@ -26,10 +26,8 @@ PROC_MATCH=${PROC_MATCH:-python|uvicorn|gunicorn|ffmpeg|onnx|onnxruntime|java|no
 PROC_REFRESH=${PROC_REFRESH:-0}
 
 # 轻量依赖提示（不阻断）
-command -v mpstat >/dev/null || echo "WARN: mpstat not found (sysstat)"
-command -v ifstat >/dev/null || echo "WARN: ifstat not found"
-command -v vmstat >/dev/null || echo "WARN: vmstat not found (procps)"
-command -v jq     >/dev/null || echo "WARN: jq not found (node_meta/link_meta json)"
+
+command -v jq     >/dev/null || echo "WARN: jq not found (node_meta json)"
 
 # 若未显式传入 NODE_ID/STAGE，尝试从正在运行的容器 env 获取（与应用保持一致）
 if [ -z "${NODE_ID:-}" ] || [ -z "${STAGE:-}" ]; then
@@ -88,40 +86,6 @@ EOF
   fi
 }
 
-# --- 写链路元信息（可选：口速/传播时延近似） ---
-link_meta() {
-  local OUT="$LOG_DIR/link_meta.json"
-  local SPEED_Mbps=$(cat /sys/class/net/$IFACE/speed 2>/dev/null || echo 0)
-  # 转为 bps（部分虚拟网卡 speed 可能为 0，表示未知）
-  local BW_BPS
-  if [ "${SPEED_Mbps:-0}" -gt 0 ] 2>/dev/null; then
-    BW_BPS=$((SPEED_Mbps*1000000))
-  else
-    BW_BPS=0
-  fi
-
-  # 传播时延近似：如果目标不是回环，用 ping 的平均 RTT/2
-  local PR_S="null"
-  if [ "$VM_IP" != "127.0.0.1" ] && [ "$VM_IP" != "localhost" ]; then
-    # 取最小 RTT（更接近传播+固定栈开销的下界）
-    local RTT_MIN_MS=$(ping -n -c3 -i0.2 -w2 "$VM_IP" 2>/dev/null | awk -F'[/= ]' '/rtt/ {print $8}')
-    if [ -n "${RTT_MIN_MS:-}" ]; then
-      PR_S=$(awk -v r="$RTT_MIN_MS" 'BEGIN{ printf("%.6f", (r/2.0)/1000.0) }')
-    fi
-  fi
-
-  if command -v jq >/dev/null; then
-    jq -n --arg iface "$IFACE" --argjson bw ${BW_BPS} --argjson pr ${PR_S:-null} \
-          '{iface:$iface,BW_bps:$bw,PR_s:$pr}' > "$OUT" || true
-  else
-    # 无 jq 时简单输出；PR_s 为空时写 null
-    if [ "${PR_S:-}" = "null" ] || [ -z "${PR_S:-}" ]; then
-      echo "{\"iface\":\"$IFACE\",\"BW_bps\":$BW_BPS,\"PR_s\":null}" > "$OUT"
-    else
-      echo "{\"iface\":\"$IFACE\",\"BW_bps\":$BW_BPS,\"PR_s\":$PR_S}" > "$OUT"
-    fi
-  fi
-}
 
 # ---- helpers: stop previous collectors in this LOG_DIR (TERM -> wait -> KILL) ----
 stop_collectors() {
@@ -223,19 +187,8 @@ if [ "$CMD" = "start" ]; then
   # pre-stop in case of repeated starts on the same RUN_ID
   stop_collectors
   node_meta
-  link_meta
 
-  # CPU：固定文本模式，避免 JSON 截断
-  nohup bash -c 'mpstat 1 > "$0"' "$LOG_DIR/cpu.log" >/dev/null 2>&1 &
-  echo $! > "$LOG_DIR/mpstat.pid"
-
-  # NET：指定网卡 + 带时间戳
-  nohup bash -c 'ifstat -i '"$IFACE"' -t 1 > "$0"' "$LOG_DIR/net.log" >/dev/null 2>&1 &
-  echo $! > "$LOG_DIR/ifstat.pid"
-
-  # MEM：带时间戳（-t），单位 MB
-  nohup bash -c 'vmstat -Sm -t 1 > "$0"' "$LOG_DIR/mem.log" >/dev/null 2>&1 &
-  echo $! > "$LOG_DIR/vmstat.pid"
+  # Host CPU/MEM samplers disabled (resources.jsonl not produced)
 
   # per-PID sampler (optional, default on). Set PROC_SAMPLING=0 to disable
   if [ "${PROC_SAMPLING:-1}" = "1" ]; then

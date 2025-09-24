@@ -35,16 +35,20 @@ def load_node_data(log_dir):
 
     # Load invocations (tasks)
     invocations = []
-    inv_file = node_dir / "cctf" / "invocations.jsonl"
+    inv_file = node_dir / "CTS" / "invocations.jsonl"
+    if not inv_file.exists():
+        inv_file = node_dir / "cctf" / "invocations.jsonl"
     if inv_file.exists():
         with open(inv_file) as f:
             for line in f:
                 if line.strip():
                     invocations.append(json.loads(line))
 
-    # Load merged per-PID metrics (CCTF): {ts_ms, pid, dt_ms, cpu_ms, rss_kb}
+    # Load merged per-PID metrics (CTS): {ts_ms, pid, dt_ms, cpu_ms, rss_kb}
     proc_metrics = []
-    pm_file = node_dir / "cctf" / "proc_metrics.jsonl"
+    pm_file = node_dir / "CTS" / "proc_metrics.jsonl"
+    if not pm_file.exists():
+        pm_file = node_dir / "cctf" / "proc_metrics.jsonl"
     if pm_file.exists():
         with open(pm_file) as f:
             for line in f:
@@ -328,7 +332,7 @@ def generate_fragments(all_node_data, tasks_df, pid_to_task_id):
 
 
 def write_small_datacenter(node_dirs, output_dir: Path):
-    """Read CCTF nodes.json from each node dir, aggregate identical hosts, and
+    """Read CTS nodes.json from each node dir, aggregate identical hosts, and
     write a small_datacenter.json with a single cluster C01.
 
     Host format must exactly match template:
@@ -337,7 +341,9 @@ def write_small_datacenter(node_dirs, output_dir: Path):
     specs = []
     for nd in node_dirs:
         try:
-            nodes_path = nd / "cctf" / "nodes.json"
+            nodes_path = nd / "CTS" / "nodes.json"
+            if not nodes_path.exists():
+                nodes_path = nd / "cctf" / "nodes.json"
             if not nodes_path.exists():
                 continue
             arr = json.load(open(nodes_path, "r"))
@@ -521,7 +527,7 @@ def main():
     print(f"Total tasks: {len(tasks_df)}")
     print(f"Total fragments: {len(fragments_df)}")
     print(f"Task duration range: {tasks_df['duration'].min():.0f} - {tasks_df['duration'].max():.0f} ms")
-    # Also export a small datacenter topology aggregated from CCTF nodes.json
+    # Also export a small datacenter topology aggregated from CTS nodes.json
     try:
         write_small_datacenter(node_dirs, output_dir)
         print(f"Saved datacenter topology to {output_dir / 'small_datacenter.json'}")

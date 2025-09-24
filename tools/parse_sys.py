@@ -15,9 +15,9 @@ if not RUN_ID:
 assert RUN_ID, "No RUN_ID and no logs/* found"
 LOGS = logs_root / RUN_ID
 print(f"[parse] RUN_ID={RUN_ID}")
-# Ensure CCTF output directory is defined early (used by multiple sections)
-cctf_dir = LOGS / "cctf"
-cctf_dir.mkdir(exist_ok=True)
+# Ensure CTS output directory is defined early (used by multiple sections)
+cts_dir = LOGS / "CTS"
+cts_dir.mkdir(exist_ok=True)
 
 
 # Resolve identity for this parse run
@@ -54,96 +54,24 @@ with open(merged_events, "w", encoding="utf-8") as out:
         out.write(json.dumps(r, ensure_ascii=False) + "\n")
 print(f"[parse] merged events → {merged_events}")
 
-# ---------- 2) CPU（mpstat 文本） + MEM（vmstat） ----------
-resources_out = LOGS / "resources.jsonl"
-with open(resources_out, "w", encoding="utf-8") as rout:
-    # CPU：仅解析 mpstat 文本输出 cpu.log，取 all 汇总行，cpu_util = 100 - idle
-    cpu_log = LOGS / "cpu.log"
-    if cpu_log.exists():
-        day = datetime.fromtimestamp(cpu_log.stat().st_mtime).strftime("%Y-%m-%d")
-        for line in open(cpu_log, "r", errors="ignore"):
-            if " all " in line and "%" in line:
-                m = re.search(r'(\d{1,2}:\d{2}:\d{2})(?:\s*[AP]M)?', line)
-                if not m:
-                    continue
-                tstr = m.group(1)
-                ts = int(datetime.strptime(f"{day} {tstr}", "%Y-%m-%d %H:%M:%S").timestamp() * 1000)
-                nums = [float(x) for x in re.findall(r'(\d+\.\d+)', line)]
-                if nums:
-                    idle = nums[-1]
-                    util = max(0.0, min(100.0, 100.0 - idle))
-                    rout.write(json.dumps({
-                        "ts_ms": ts, "node": NODE_ID, "stage": STAGE, "cpu_util": round(util, 2)
-                    }) + "\n")
-
-    # MEM：vmstat -Sm 1（保持你原来的解析逻辑）
-    mem_log = LOGS / "mem.log"
-    if mem_log.exists():
-        for line in open(mem_log, "r", errors="ignore"):
-            if line.strip().startswith("r"):
-                continue
-            cols = line.split()
-            if len(cols) >= 7 and cols[0].isdigit():
-                ts = int(time.time() * 1000)  # vmstat 无时间戳，取当前时间近似
-                free_mb = int(cols[3])
-                rout.write(json.dumps({
-                    "ts_ms": ts, "node": NODE_ID, "stage": STAGE, "mem_free_mb": free_mb
-                }) + "\n")
+# ---------- 2) Host-level CPU/MEM sampling (deprecated) ----------
+# resources.jsonl is no longer produced; host samplers (mpstat/vmstat) are disabled.
 
 
-# ---------- 3) NET（ifstat -t） ----------
-# ---------- 3) NET（ifstat） ----------
-links_out = LOGS / "links.jsonl"
-with open(links_out, "w", encoding="utf-8") as lout:
-    net_log = LOGS / "net.log"
-    if net_log.exists():
-        # 取文件修改日期作为“当天”
-        day = datetime.fromtimestamp(net_log.stat().st_mtime).strftime("%Y-%m-%d")
-        for line in open(net_log, "r", errors="ignore"):
-            line = line.strip()
-            # 跳过表头
-            if not line or line.startswith("Time") or line.startswith("HH:MM:SS"):
-                continue
-            # 1) 只有时刻的情况: HH:MM:SS  rx  tx
-            m = re.match(r'^(\d{2}:\d{2}:\d{2})\s+([\d.]+)\s+([\d.]+)$', line)
-            if m:
-                t = m.group(1)
-                dt = datetime.strptime(f"{day} {t}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                ts = int(dt.timestamp()*1000)
-                rx_kbs = float(m.group(2)); tx_kbs = float(m.group(3))
-                lout.write(json.dumps({
-                    "ts_ms": ts,
-                    "node": NODE_ID, "stage": STAGE,
-                    "link": f"{NODE_ID}.nic",
-                    "rx_Bps": int(rx_kbs*1024),
-                    "tx_Bps": int(tx_kbs*1024)
-                })+"\n")
-                continue
-            # 2) 带日期的一行式: YYYY-MM-DD HH:MM:SS  rx  tx（保留兼容）
-            m2 = re.match(r'^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+([\d.]+)\s+([\d.]+)$', line)
-            if m2:
-                dt = datetime.strptime(m2.group(1)+" "+m2.group(2), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                ts = int(dt.timestamp()*1000)
-                rx_kbs = float(m2.group(3)); tx_kbs = float(m2.group(4))
-                lout.write(json.dumps({
-                    "ts_ms": ts,
-                    "node": NODE_ID, "stage": STAGE,
-                    "link": f"{NODE_ID}.nic",
-                    "rx_Bps": int(rx_kbs*1024),
-                    "tx_Bps": int(tx_kbs*1024)
-                })+"\n")
-print(f"[parse] links → {links_out}")
+# ---------- 3) NET (disabled) ----------
+# Network link collection/parsing is disabled; links.jsonl is no longer produced.
 
-# ---------- 6) 标准化 per-PID 采样（合并为 CCTF proc_metrics） ----------
+
+# ---------- 6) 标准化 per-PID 采样（合并为 CTS proc_metrics） ----------
 proc_metrics = LOGS / "proc_metrics.jsonl"
 if proc_metrics.exists():
-    cctf_dir.mkdir(exist_ok=True)
-    # 生成合并后的 CCTF proc_metrics：每行包含 {ts_ms, pid, dt_ms, cpu_ms, rss_kb}
+    cts_dir = LOGS / "CTS"; cts_dir.mkdir(exist_ok=True)
+    # 生成合并后的 CTS proc_metrics：每行包含 {ts_ms, pid, dt_ms, cpu_ms, rss_kb}
     try:
         CLK_TCK = int(os.popen("getconf CLK_TCK").read().strip() or "100")
     except Exception:
         CLK_TCK = 100
-    merged_out = cctf_dir / "proc_metrics.jsonl"
+    merged_out = cts_dir / "proc_metrics.jsonl"
     last = {}  # pid -> (utime, stime, ts_ms)
     with open(proc_metrics, "r", encoding="utf-8", errors="ignore") as fin, \
          open(merged_out, "w", encoding="utf-8") as mout:
@@ -171,14 +99,14 @@ if proc_metrics.exists():
                     last[pid] = (ut, st, ts)
             elif isinstance(ut, int) and isinstance(st, int):
                 last[pid] = (ut, st, ts)
-            # 合并后的 CCTF 记录（首样本 dt/cpu 为 0 以占位）
+            # 合并后的 CTS 记录（首样本 dt/cpu 为 0 以占位）
             rec = {"ts_ms": ts, "pid": pid, "dt_ms": int(dt_ms), "cpu_ms": int(cpu_ms)}
             if isinstance(rss_kb, int):
                 rec["rss_kb"] = rss_kb
             mout.write(json.dumps(rec) + "\n")
-    print(f"[parse] derived merged proc_metrics → {cctf_dir}")
+    print(f"[parse] derived merged proc_metrics → {cts_dir}")
 
-# ---------- 7) （精简）不再复制 placement/system_stats 到 CCTF ----------
+# ---------- 7) （精简）不再复制 placement/system_stats 到 CTS ----------
 
 
 # ---------- 4) 复制客户端事件到 run 目录（若存在） ----------
@@ -189,8 +117,8 @@ if not ec_src.exists():
         (ROOT / "events_client.jsonl").replace(ec_src)
 print(f"[parse] client events at → {ec_src if ec_src.exists() else 'N/A'}")
 
-# ---------- 5) 生成 CCTF（精简产物 + 审计） ----------
-cctf_dir = LOGS / "cctf"; cctf_dir.mkdir(exist_ok=True)
+# ---------- 5) 生成 CTS（精简产物 + 审计） ----------
+cts_dir = LOGS / "CTS"; cts_dir.mkdir(exist_ok=True)
 # 仅输出 nodes.json
 meta = json.load(open(LOGS / "node_meta.json", "r"))
 # Normalize freq and memory to reduce near-duplicates (e.g., 2399→2400 MHz; 15997MB→16GiB)
@@ -198,7 +126,7 @@ raw_freq = meta.get("cpu_freq_mhz") or 0
 norm_freq = int(round(float(raw_freq) / 100.0) * 100) if raw_freq and raw_freq > 0 else raw_freq
 raw_mem_mb = meta.get("mem_mb") or 0
 norm_mem_mb = int(round(float(raw_mem_mb) / 1024.0) * 1024) if raw_mem_mb and raw_mem_mb > 0 else raw_mem_mb
-with open(cctf_dir / "nodes.json", "w") as f:
+with open(cts_dir / "nodes.json", "w") as f:
     json.dump([{
         "node_id": meta["node"],
         "stage": meta["stage"],
@@ -210,7 +138,7 @@ with open(cctf_dir / "nodes.json", "w") as f:
 # 仅输出精简字段的 invocations.jsonl（proc_metrics 已在步骤 6 生成）
 # 保留字段：trace_id、pid、ts_enqueue、ts_start、ts_end
 with open(merged_events, "r", encoding="utf-8", errors="ignore") as fin, \
-     open(cctf_dir / "invocations.jsonl", "w", encoding="utf-8") as fout:
+     open(cts_dir / "invocations.jsonl", "w", encoding="utf-8") as fout:
     for line in fin:
         line = line.strip()
         if not line:
@@ -228,9 +156,9 @@ with open(merged_events, "r", encoding="utf-8", errors="ignore") as fin, \
         }
         fout.write(json.dumps(rec) + "\n")
 
-# 清理 CCTF 目录中非 {invocations.jsonl, proc_metrics.jsonl, nodes.json, audit_report.md} 的文件
+# 清理 CTS 目录中非 {invocations.jsonl, proc_metrics.jsonl, nodes.json, audit_report.md} 的文件
 allowed = {"invocations.jsonl", "proc_metrics.jsonl", "nodes.json", "audit_report.md"}
-for p in cctf_dir.iterdir():
+for p in cts_dir.iterdir():
     if p.is_file() and p.name not in allowed:
         try:
             p.unlink()
@@ -238,8 +166,8 @@ for p in cctf_dir.iterdir():
             pass
 
 # 生成审计报告（英文）
-inv_path = cctf_dir / "invocations.jsonl"
-pm_path = cctf_dir / "proc_metrics.jsonl"
+inv_path = cts_dir / "invocations.jsonl"
+pm_path = cts_dir / "proc_metrics.jsonl"
 audit_lines = []
 # 读取 invocations
 inv_rows = []
@@ -316,7 +244,7 @@ match_rate = (len(matched) / len(inv_pids)) if inv_pids else 0.0
 
 # 生成 Markdown 审计报告
 md = []
-md.append("# CCTF Audit Report\n")
+md.append("# CTS Audit Report\n")
 md.append(f"Node: {meta.get('node')}  |  Stage: {meta.get('stage')}\n")
 md.append("\n## Summary\n")
 md.append(f"Invocations: {len(inv_rows)}\n")
@@ -343,5 +271,5 @@ if unmatched:
     sample = list(sorted(unmatched))[:10]
     md.append(f"  sample unmatched PIDs: {sample}\n")
 
-(cctf_dir / "audit_report.md").write_text("".join(md), encoding="utf-8")
-print(f"[parse] CCTF (slim) → {cctf_dir}; audit_report.md generated")
+(cts_dir / "audit_report.md").write_text("".join(md), encoding="utf-8")
+print(f"[parse] CTS (slim) → {cts_dir}; audit_report.md generated")

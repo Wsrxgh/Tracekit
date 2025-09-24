@@ -5,7 +5,7 @@
 # - per-PID sampling: whitelist via PROC_PID_DIR or fallback regex scan via PROC_MATCH
 # - interval default 200ms (PROC_INTERVAL_MS), with sleep compensation
 # - RSS via /proc/<pid>/statm (resident pages * 4KB)
-# - STOP_ALL support: kill stray mpstat/ifstat/vmstat on stop
+# - STOP_ALL support: kill stray mpstat/vmstat on stop
 # - Process-group friendly kill on stop
 
 from __future__ import annotations
@@ -120,25 +120,6 @@ def write_node_meta() -> None:
     (LOG_DIR / "node_meta.json").write_text(json.dumps(obj))
 
 
-def write_link_meta() -> None:
-    iface = _default_iface()
-    # BW via /sys/class/net (may be 0 for virtual)
-    try:
-        speed_mbps = int((Path(f"/sys/class/net/{iface}/speed").read_text().strip()))
-        bw_bps = speed_mbps * 1_000_000 if speed_mbps > 0 else 0
-    except Exception:
-        bw_bps = 0
-    # PR via ping min/2 (best effort)
-    pr_s = None
-    if VM_IP not in ("127.0.0.1", "localhost"):
-        try:
-            out = subprocess.check_output(["bash", "-lc", f"ping -n -c3 -i0.2 -w2 {VM_IP} | awk -F'[/= ]' '/rtt/ {{print $8}}'"], text=True).strip()
-            if out:
-                pr_s = float(out) / 2000.0  # ms→s, /2
-        except Exception:
-            pr_s = None
-    obj = {"iface": iface, "BW_bps": bw_bps, "PR_s": pr_s}
-    (LOG_DIR / "link_meta.json").write_text(json.dumps(obj))
 
 
 def _pg_kill(pid: int, sig: int) -> None:
@@ -159,19 +140,8 @@ def _pg_kill(pid: int, sig: int) -> None:
 
 
 def start_host_samplers() -> None:
-    # Write node/link metadata first (parse depends on them)
+    # Write node metadata first (host CPU/MEM samplers disabled)
     write_node_meta()
-    write_link_meta()
-    iface = _default_iface()
-    # mpstat
-    mp = subprocess.Popen(["bash", "-lc", f"mpstat 1 > \"$0\"", str(LOG_DIR / "cpu.log")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    PID_MPSTAT.write_text(str(mp.pid))
-    # ifstat
-    ifp = subprocess.Popen(["bash", "-lc", f"ifstat -i {iface} -t 1 > \"$0\"", str(LOG_DIR / "net.log")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    PID_IFSTAT.write_text(str(ifp.pid))
-    # vmstat
-    vm = subprocess.Popen(["bash", "-lc", f"vmstat -Sm -t 1 > \"$0\"", str(LOG_DIR / "mem.log")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    PID_VMSTAT.write_text(str(vm.pid))
 
 
 def list_pids_whitelist() -> List[int]:

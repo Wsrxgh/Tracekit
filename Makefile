@@ -62,7 +62,7 @@ else
 endif
 
 load:
-	@RUN_ID=$(RUN_ID) bash tools/drive_load.sh $(VM_IP) $(RATE) $(DURATION) $(CPU_MS) $(RESP_KB) '$(CALL_URL)'
+	@echo "[deprecated] load target removed: tools/drive_load.sh has been deleted; please use your own load generator."
 
 
 stop-collect:
@@ -74,13 +74,13 @@ endif
 
 parse:
 	@RUN_ID=$(RUN_ID) NODE_ID=$(NODE_ID) STAGE=$(STAGE) python3 tools/parse_sys.py
-	@python3 tools/write_module_inventory.py
+
 	@echo "\nArtifacts (logs/$(RUN_ID)):"
 	@echo "  events.jsonl (服务端), events_client.jsonl (客户端)"
-	@echo "  resources.jsonl (CPU/MEM), links.jsonl (网络)"
-	@echo "  node_meta.json, run_meta.json, module_inventory.json"
+
+	@echo "  node_meta.json, run_meta.json"
 	@echo "  placement_events.jsonl (开始/停止/扩缩容)、system_stats.jsonl (实例并发)"
-	@echo "  cctf/{nodes.json,links.json,invocations.jsonl,host_metrics.jsonl,link_metrics.jsonl,placement_events.jsonl,system_stats.jsonl}"
+	@echo "  CTS/{nodes.json,invocations.jsonl,proc_metrics.jsonl,audit_report.md}"
 
 baseline: setup build run start-collect load stop-collect parse
 
@@ -101,31 +101,21 @@ REAL_RATE ?= 40
 REAL_DUR ?= 20s
 REAL_SIZE ?= 8192
 
-real-json: setup build run start-collect
-	@RUN_ID=$(RUN_ID) bash tools/drive_real.sh json $(VM_IP) $(REAL_RATE) $(REAL_DUR) $(REAL_SIZE)
-	@$(MAKE) RUN_ID=$(RUN_ID) stop-collect parse
+real-json:
+	@echo "[deprecated] real-json removed: tools/drive_real.sh has been deleted."
 
-real-gzip: setup build run start-collect
-	@RUN_ID=$(RUN_ID) bash tools/drive_real.sh gzip $(VM_IP) $(REAL_RATE) $(REAL_DUR) $(REAL_SIZE)
-	@$(MAKE) RUN_ID=$(RUN_ID) stop-collect parse
+real-gzip:
+	@echo "[deprecated] real-gzip removed: tools/drive_real.sh has been deleted."
 
 real-hash: setup build run start-collect
-	@RUN_ID=$(RUN_ID) bash tools/drive_real.sh hash $(VM_IP) $(REAL_RATE) $(REAL_DUR) $(REAL_SIZE)
-	@$(MAKE) RUN_ID=$(RUN_ID) stop-collect parse
+	@echo "[deprecated] real-hash removed: tools/drive_real.sh has been deleted."
 
 real-kvset: setup build run start-collect
-	@RUN_ID=$(RUN_ID) bash tools/drive_real.sh kvset $(VM_IP) $(REAL_RATE) $(REAL_DUR) $(REAL_SIZE)
-	@$(MAKE) RUN_ID=$(RUN_ID) stop-collect parse
+	@echo "[deprecated] real-kvset removed: tools/drive_real.sh has been deleted."
 
 real-kvget: setup build run start-collect
-	@RUN_ID=$(RUN_ID) bash tools/drive_real.sh kvget $(VM_IP) $(REAL_RATE) $(REAL_DUR) $(REAL_SIZE)
-	@$(MAKE) RUN_ID=$(RUN_ID) stop-collect parse
+	@echo "[deprecated] real-kvget removed: tools/drive_real.sh has been deleted."
 
 # run all real endpoints sequentially (lightweight)
 real-all: setup build run start-collect
-	@echo "Running real-json..." && RUN_ID=$(RUN_ID) bash tools/drive_real.sh json $(VM_IP) $(REAL_RATE) $(REAL_DUR) $(REAL_SIZE)
-	@echo "Running real-gzip..." && RUN_ID=$(RUN_ID) bash tools/drive_real.sh gzip $(VM_IP) $(REAL_RATE) $(REAL_DUR) $(REAL_SIZE)
-	@echo "Running real-hash..." && RUN_ID=$(RUN_ID) bash tools/drive_real.sh hash $(VM_IP) $(REAL_RATE) $(REAL_DUR) $(REAL_SIZE)
-	@echo "Running real-kvset..." && RUN_ID=$(RUN_ID) bash tools/drive_real.sh kvset $(VM_IP) $(REAL_RATE) $(REAL_DUR) $(REAL_SIZE)
-	@echo "Running real-kvget..." && RUN_ID=$(RUN_ID) bash tools/drive_real.sh kvget $(VM_IP) $(REAL_RATE) $(REAL_DUR) $(REAL_SIZE)
-	@$(MAKE) RUN_ID=$(RUN_ID) stop-collect parse
+	@echo "[deprecated] real-all removed: tools/drive_real.sh has been deleted."

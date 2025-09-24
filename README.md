@@ -7,8 +7,8 @@ A comprehensive cloud application tracing and performance monitoring framework d
 Tracekit provides multi-layer observability for cloud applications:
 - **Application-level**: Request/response tracing with timing and resource usage
 - **Process-level**: Per-PID CPU and memory monitoring
-- **System-level**: Host CPU, memory, and network metrics
-- **Infrastructure**: Node topology and link characteristics
+- **System-level (deprecated)**: Host CPU/memory/network metrics are no longer produced in the core flow
+- **Infrastructure**: Node topology (link metrics deprecated/not produced)
 
 ## Key Features
 
@@ -18,6 +18,19 @@ Tracekit provides multi-layer observability for cloud applications:
 - 📈 **High-precision timing**: Millisecond-level timestamps for accurate analysis
 - 🐳 **Container-aware**: Works with Docker containers and bare metal
 - 🌐 **Multi-node**: Coordinate tracing across distributed deployments
+
+## Adapter and application boundary (updated)
+
+- Application (SUT): the real executable you run (here, system ffmpeg in /usr/bin/ffmpeg)
+- Adapter (non-intrusive wrapper): tools/adapters/ffmpeg_wrapper.py (Python)
+  - Launches ffmpeg, writes precise ts_start (from /proc starttime) and ts_end, and creates/removes PID sentinels under logs/$RUN_ID/pids for whitelist collection
+  - Optionally uses systemd-run --scope to apply CPUQuota/CPUWeight from the first time slice (shared mode)
+- Explicit app entry (optional): tools/apps/ffmpeg_app.py simply forwards args to system ffmpeg; provided to make the app boundary explicit in-repo
+- Scheduling/orchestration: dispatcher.py, scheduler_central.py, worker.py (control plane, not part of the adapter)
+- Contract between layers:
+  - Worker/dispatcher → Adapter: pass TS_ENQUEUE (if available) and resource hints via ENV; Adapter handles timing and PID sentinels
+  - Adapter → Collector: PID sentinels only; Collector samples /proc in whitelist mode (PROC_PID_DIR)
+
 
 
 ## Variables and placeholders used in commands
@@ -36,7 +49,7 @@ Tracekit provides multi-layer observability for cloud applications:
 
 ### New VM setup checklist
 - Common (all nodes):
-  - OS packages: `sudo apt update && sudo apt install -y sysstat ifstat jq python3 python3-pip redis-tools`
+  - OS packages: `sudo apt update && sudo apt install -y jq python3 python3-pip redis-tools`  # systemd-run support is optional
   - Clone repo to `~/Tracekit` and ensure `run_id.env` present on each node
 - Controller node (cloud0):
   - Install Redis server (if not present): `sudo apt install -y redis-server`
@@ -133,48 +146,55 @@ To avoid occasional deadlocks caused by stale Redis keys left from previous runs
   - `--clear-queue`: Delete `q:<node>` on startup for a clean run (use only in testing)
 - Central scheduler fallback: even if `slots:available` contains leftover tokens, the scheduler will fall back to capacity-only dispatch when no feasible token can be used. This prevents blocking on stale tokens.
 
-### Quick test flow (sudo workers + shared fair-sharing + pending pulse)
+### Complete test flow (Python Adapter, sudo workers, shared fair-sharing)
 
-Use this when you want Max-Min fairness (shared mode with dynamic CPUQuota) and a robust, repeatable run.
+Use this when you want Max‑Min fairness (shared mode with dynamic CPUQuota via systemd), Python adapter precision, and a clean, repeatable run.
 
 1) On ALL workers (start collectors first, then workers with sudo)
 ```bash
 cd ~/Tracekit && source run_id.env
+# Clean previous artifacts on this worker
 USE_PY_COLLECT=1 STOP_ALL=1 make stop-collect RUN_ID=$RUN_ID || true; pkill -f tools/scheduler/worker.py || true
 rm -rf outputs/* logs/$RUN_ID/pids || true; mkdir -p logs/$RUN_ID/pids
-USE_PY_COLLECT=1 PROC_SAMPLING=1 PROC_REFRESH=1 PROC_INTERVAL_MS=1000 \
-  PROC_PID_DIR=logs/$RUN_ID/pids PROC_MATCH='^ffmpeg$|^ffprobe$' \
-  make start-collect RUN_ID=$RUN_ID STAGE=cloud VM_IP=<controller_ip>
 
+# Start collector in PID whitelist mode (recommended) at 1000ms
+USE_PY_COLLECT=1 PROC_INTERVAL_MS=1000 \
+  PROC_PID_DIR="logs/$RUN_ID/pids" PROC_MATCH='^ffmpeg$|^ffprobe$' \
+  NODE_ID=$(hostname) STAGE=cloud VM_IP=<controller_ip> \
+  make start-collect RUN_ID=$RUN_ID
+
+# Start worker (shared mode + 1.25 overprovision). Use sudo so CPUQuota/CPUWeight can be applied.
 sudo -E RUN_ID=$RUN_ID python3 tools/scheduler/worker.py \
   --outputs outputs \
-  --allocation-ratio 1.5 \
+  --allocation-ratio 1.25 \
   --cpu-binding shared \
-  --reset-capacity \
-  --clear-queue \
   --redis "redis://:Wsr123@<controller_ip>:6379/0"
+# Optional for clean tests: add --reset-capacity and/or --clear-queue
 ```
-Notes:
-- `sudo -E` preserves RUN_ID and enables setting CPUQuota/CPUWeight.
-- `--reset-capacity` avoids stale `cap:<node>`; `--clear-queue` ensures q:<node> is empty before a new test.
 
-2) On controller (clean + start central + enqueue pulses)
+2) On controller (clean queues, start central with weigher, then enqueue)
 ```bash
 cd ~/Tracekit && source run_id.env
+# Kill old control-plane processes
 pkill -f tools/scheduler/scheduler_central.py || true; pkill -f tools/scheduler/dispatcher.py || true
-redis-cli -a 'Wsr123' -h <controller_ip> DEL q:pending slots:available || true
-for n in $(printf "%s\n" $(hostname) cloud0gxie cloud1gxie cloud2gxie cloud3gxie); do
-  redis-cli -a 'Wsr123' -h <controller_ip> DEL q:$n >/dev/null 2>&1 || true;
-  redis-cli -a 'Wsr123' -h <controller_ip> SET cap:$n 6 >/dev/null 2>&1 || true;
-done
-mkdir -p "logs/$RUN_ID"
-nohup python3 tools/scheduler/scheduler_central.py --redis "redis://:Wsr123@<controller_ip>:6379/0" > "logs/$RUN_ID/central.log" 2>&1 &
+# Clean Redis queues from last run
+redis-cli -a 'Wsr123' -h <controller_ip> DEL q:pending || true
+for k in $(redis-cli -a 'Wsr123' -h <controller_ip> KEYS 'q:run.*'); do redis-cli -a 'Wsr123' -h <controller_ip> DEL "$k"; done
 
+# Start central with weigher=instances (prefer fewer running instances)
+mkdir -p "logs/$RUN_ID"
+nohup python3 tools/scheduler/scheduler_central.py \
+  --redis "redis://:Wsr123@<controller_ip>:6379/0" \
+  --weigher instances --weigher-order min \
+  > "logs/$RUN_ID/central.log" 2>&1 &
+
+# Enqueue 20 tasks (seed unchanged)
 python3 tools/scheduler/dispatcher.py \
   --inputs inputs/ffmpeg \
   --outputs outputs \
   --pending --pending-mode pulse --pulse-size 10 --pulse-interval 100 \
-  --mix "fast1080p=2,medium480p=3,hevc1080p=2,light1c=3" --total 20 --seed 20250901 \
+  --mix "fast1080p=2,medium480p=3,hevc1080p=2,light1c=3" \
+  --total 20 --seed 20250901 \
   --redis "redis://:Wsr123@<controller_ip>:6379/0"
 ```
 
@@ -183,6 +203,20 @@ python3 tools/scheduler/dispatcher.py \
 cd ~/Tracekit && source run_id.env
 make stop-collect RUN_ID=$RUN_ID && make parse RUN_ID=$RUN_ID
 ```
+
+Parameters and defaults (summary):
+- Worker (tools/scheduler/worker.py):
+  - --outputs=outputs, --redis=redis://localhost:6379/0
+  - --parallel=0 (cap-only), --allocation-ratio=1.0, --capacity-units=0 (use ratio×logical_cores)
+  - --cpu-binding=exclusive (use shared for fair sharing), --cpuweight-per-vcpu=100
+  - --reset-capacity (off), --clear-queue (off)
+- Central (tools/scheduler/scheduler_central.py):
+  - --redis required; --weigher="" (first-fit) | instances | vcpu; --weigher-order=min|max (default=min)
+- Dispatcher (tools/scheduler/dispatcher.py):
+  - --inputs required; --outputs=outputs; --mix; --total; --seed; --pending-mode=pulse; --pulse-size=10; --pulse-interval=100
+- Collector (tools/collect_sys.py via env):
+  - PROC_PID_DIR=logs/$RUN_ID/pids (whitelist on); PROC_INTERVAL_MS=200 (default; recommend 1000)
+  - PROC_MATCH='^ffmpeg$|^ffprobe$'; USE_PY_COLLECT=1
 
 
 ### Host weigher (optional)
@@ -221,7 +255,7 @@ Notes:
 
 ---
 
-## End-to-end multi-node trace collection test (current flow)
+## [DEPRECATED] Legacy end-to-end multi-node trace collection test
 This section documents the steps with a controller node (cloud0) and two workers (cloud1, cloud2). Redis runs on cloud0 and REQUIRES PASSWORD. All nodes share the same repo layout.
 
 Important: Redis requires auth. Always use URLs like `redis://:Wsr123@HOST:6379/0`.
@@ -426,7 +460,7 @@ cd ~/Tracekit && source run_id.env
 make stop-collect RUN_ID=$RUN_ID
 make parse RUN_ID=$RUN_ID NODE_ID=cloud2 STAGE=cloud
 ```
-Artifacts under logs/$RUN_ID/cctf/: invocations.jsonl, proc_cpu.jsonl, proc_rss.jsonl, etc.
+Artifacts under logs/$RUN_ID/CTS/: invocations.jsonl, proc_metrics.jsonl, nodes.json, audit_report.md.
 
 7) Export to OpenDC (cloud0, optional)
 ```bash
@@ -442,12 +476,12 @@ Troubleshooting (private flow)
 
 ## Output
 
-The framework generates standardized traces in `logs/$RUN_ID/cctf/`:
-- `invocations.jsonl`: Application-level task execution records
-- `proc_cpu.jsonl`, `proc_rss.jsonl`: Process-level resource usage
-- `host_metrics.jsonl`: System-level CPU/memory time series
-- `nodes.json`, `links.json`: Infrastructure topology
-- Additional files for placement events, network metrics, etc.
+The framework generates standardized traces in `logs/$RUN_ID/CTS/`:
+- `invocations.jsonl`: Application-level task execution records (trace_id, pid, ts_enqueue, ts_start, ts_end)
+- `proc_metrics.jsonl`: Process-level time series (ts_ms, pid, dt_ms, cpu_ms, rss_kb)
+- `nodes.json`: Node metadata (node_id, stage, cpu_cores, mem_mb, cpu_model, cpu_freq_mhz)
+- `audit_report.md`: Validation summary (field completeness, temporal consistency, cross-reference)
+- Note: legacy network/link artifacts are deprecated and not produced: links.json/links.jsonl, link_meta.json, link_metrics.jsonl, system_stats.jsonl, placement_events.jsonl.
 
 ## OpenDC Integration
 
@@ -474,10 +508,12 @@ See `docs/README.md` for detailed format specifications.
 
 ## Requirements
 
-- Linux system with standard monitoring tools (mpstat, vmstat, ifstat)
+- Linux system
 - Python 3.8+
-- Docker (optional, for container monitoring)
-- vegeta (optional, for load generation)
+- redis-tools (for quick connectivity checks)
+- systemd (optional; for systemd-run CPUWeight/CPUQuota in shared mode)
+- jq (optional; convenience for inspecting JSON files)
+- vegeta (optional; for load generation if you choose to use it)
 
 ## License
 

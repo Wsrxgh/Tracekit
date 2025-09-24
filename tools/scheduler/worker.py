@@ -27,8 +27,10 @@ def run_task(task: dict, root: Path) -> int:
     # Optional thread limits from task (vthreads for codec, fthreads for filters)
     vthreads = str(task.get("vthreads", ""))
     fthreads = str(task.get("fthreads", ""))
-    cmd = [
-        "bash", str(root / "tools" / "adapters" / "ffmpeg_wrapper.sh"),
+    # Prefer Python adapter if available; fallback to shell adapter
+    adapter_py = root / "tools" / "adapters" / "ffmpeg_wrapper.py"
+    adapter_sh = root / "tools" / "adapters" / "ffmpeg_wrapper.sh"
+    base_cmd = [
         "-i", task["input"],
         "-vf", f"scale={scale}",
         "-c:v", libv,
@@ -36,13 +38,17 @@ def run_task(task: dict, root: Path) -> int:
         "-crf", str(crf),
     ]
     if vthreads and vthreads.isdigit():
-        cmd += ["-threads:v", vthreads]
+        base_cmd += ["-threads:v", vthreads]
     if fthreads and fthreads.isdigit():
-        cmd += ["-filter_threads", fthreads]
-    cmd += [
+        base_cmd += ["-filter_threads", fthreads]
+    base_cmd += [
         "-c:a", "copy",
         str(out_path),
     ]
+    if adapter_py.exists():
+        cmd = [sys.executable, str(adapter_py)] + base_cmd
+    else:
+        cmd = ["bash", str(adapter_sh)] + base_cmd
     env = os.environ.copy()
     # RUN_ID optional at this stage; wrapper will write events if present
     env.setdefault("NODE_ID", os.getenv("NODE_ID", "vm0"))

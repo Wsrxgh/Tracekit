@@ -56,3 +56,12 @@ full_flow_*.py
 
 # Generated inputs
 inputs/ffmpeg/
+
+
+# User shell/environment dotfiles (not project-related)
+.bashrc
+.bash_logout
+.profile
+.bash_history
+.wget-hsts
+.sudo_as_admin_successful
