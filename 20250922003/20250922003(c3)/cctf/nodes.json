@@ -1,0 +1,10 @@
+[
+  {
+    "node_id": "vm0",
+    "stage": "cloud",
+    "cpu_cores": 4,
+    "mem_mb": 16384,
+    "cpu_model": "QEMU Virtual CPU version 2.5+",
+    "cpu_freq_mhz": 2400
+  }
+]

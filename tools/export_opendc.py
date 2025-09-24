@@ -455,21 +455,34 @@ def main():
     # Update cpu_capacity to P95 (fallback to existing if missing)
     tasks_df['cpu_capacity'] = tasks_df['p95_mhz'].fillna(tasks_df['cpu_capacity'])
 
-    # Derive cpu_count = ceil(cpu_capacity / node_freq_mhz), clamped to node cores
+    # Derive cpu_count using rounded ratio (snap 1-core cases), then normalize 1-core capacity
     def _derive_count(row):
         node_info = task_node_info.get(int(row['id']), {})
         freq = float(node_info.get('cpu_freq_mhz') or np.nan)
         cores = int(node_info.get('cpu_cores') or 0)
-
-
         if not np.isfinite(freq) or freq <= 0:
             return int(row['cpu_count'])
-        count = int(math.ceil(float(row['cpu_capacity']) / freq))
+        ratio = float(row['cpu_capacity']) / float(freq)
+        count = int(round(ratio))
+        count = max(1, count)
         if cores > 0:
             count = min(count, cores)
-        return max(1, count)
+        return count
 
     tasks_df['cpu_count'] = tasks_df.apply(_derive_count, axis=1).astype('int32')
+
+    def _normalize_capacity(row):
+        node_info = task_node_info.get(int(row['id']), {})
+        freq = float(node_info.get('cpu_freq_mhz') or np.nan)
+        cap = float(row['cpu_capacity'])
+        if np.isfinite(freq) and freq > 0 and int(row['cpu_count']) == 1:
+            # If capacity is close to 1-core frequency, snap to nearest 100 MHz bucket around freq
+            if abs(cap - freq) <= 200.0:
+                rounded = int(round(freq / 100.0)) * 100
+                return float(rounded)
+        return cap
+
+    tasks_df['cpu_capacity'] = tasks_df.apply(_normalize_capacity, axis=1).astype('float64')
     tasks_df.drop(columns=['p95_mhz'], inplace=True)
 
     # Save to parquet files with explicit required schemas
