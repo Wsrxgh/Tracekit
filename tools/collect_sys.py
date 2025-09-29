@@ -256,7 +256,65 @@ def run_procmon_loop() -> None:
         out_fh.close()
 
 
+
+# --- Best-effort time synchronization (public NTP pool) ---
+# Runs at start() if TIME_SYNC=1 (default). Requires sudo/root to actually set time.
+# If no privileges, skips silently but logs before/after UTC for auditing.
+def _time_sync() -> None:
+    try:
+        if os.getenv("TIME_SYNC", "1") != "1":
+            return
+        from datetime import datetime, timezone
+        import shutil
+        log = LOG_DIR / "timesync.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        pool = os.getenv("NTP_POOL", "pool.ntp.org")
+        def _now_iso() -> str:
+            return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")[:-4] + "Z"
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write(f"== Time sync start ==\n")
+            fh.write(f"Host: {socket.gethostname()}  UTC(before): {_now_iso()}\n")
+            # Check privilege: root or passwordless sudo
+            def _can_sudo_nopass() -> bool:
+                try:
+                    r = subprocess.run(["sudo", "-n", "true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return r.returncode == 0
+                except Exception:
+                    return False
+            is_root = False
+            try:
+                is_root = (os.geteuid() == 0)
+            except Exception:
+                is_root = False
+            can_priv = is_root or _can_sudo_nopass()
+            def run(cmd: str) -> None:
+                # Use sudo -n if not root
+                prefix = [] if is_root else (["sudo", "-n"] if can_priv else [])
+                subprocess.run(["bash", "-lc", cmd], stdout=fh, stderr=subprocess.STDOUT)
+            if can_priv:
+                if shutil.which("chronyc"):
+                    run("chronyc -a 'burst 4/4' || true")
+                    run("chronyc -a makestep || true")
+                    run("chronyc tracking || true")
+                elif shutil.which("timedatectl"):
+                    run("timedatectl set-ntp true || true")
+                    run("sleep 1; timedatectl timesync-status || true")
+                elif shutil.which("ntpdate"):
+                    run(f"ntpdate -u {pool} || true")
+                elif shutil.which("sntp"):
+                    run(f"sntp -sS {pool} || true")
+                else:
+                    fh.write("WARN: no time sync client found (chronyc/timedatectl/ntpdate/sntp)\n")
+            else:
+                fh.write("INFO: skip time sync (no sudo privileges); relying on existing system sync.\n")
+            fh.write(f"UTC(after):  {_now_iso()}\n")
+            fh.write("== Time sync end ==\n")
+    except Exception:
+        # Never block start on time sync issues
+        pass
+
 def start() -> None:
+    _time_sync()
     # Host samplers
     start_host_samplers()
     # Per-PID sampler (background)

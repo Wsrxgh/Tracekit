@@ -65,6 +65,15 @@ Tracekit provides multi-layer observability for cloud applications:
   - Ensure inputs directory exists and contains files matching controller paths (sync if no shared storage)
 
 
+### Time synchronization (auto, best‑effort)
+- Collectors attempt a best‑effort time sync at start using the public NTP pool (pool.ntp.org) when sudo is available.
+- If no sudo privileges are available, the sync step is skipped silently; the system’s existing chrony/timesyncd continues to maintain time.
+- Environment variables:
+  - TIME_SYNC=1 (default on)
+  - NTP_POOL=pool.ntp.org (override if you run an internal NTP server)
+- Logs: each worker writes logs/$RUN_ID/timesync.log recording before/after UTC timestamps and client outputs.
+
+
 ### Concurrency and capacity (READ THIS)
 - **parallel** (per worker): maximum number of tasks that can run concurrently on that node
 - **cpu_units** (per task): CPU capacity required by a task; defaults from profiles:

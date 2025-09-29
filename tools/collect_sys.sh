@@ -183,10 +183,45 @@ PIDS=""; for p in /proc/[0-9]*; do bn=${p##*/}; f="/proc/$bn/comm"; [ -r "$f" ] 
   fi
 }
 
+
+# ---- best-effort time sync (public pool) ----
+time_sync() {
+  [ "${TIME_SYNC:-1}" = "1" ] || return 0
+  mkdir -p "$LOG_DIR"; LOG="$LOG_DIR/timesync.log"
+  {
+    echo "== Time sync start =="
+    echo "Host: $(hostname)  UTC(before): $(date -u +%FT%T.%3NZ)"
+    CAN=0
+    if [ "$(id -u)" -eq 0 ]; then CAN=1; fi
+    if sudo -n true >/dev/null 2>&1; then CAN=1; fi
+    if [ "$CAN" -eq 1 ]; then
+      if command -v chronyc >/dev/null 2>&1; then
+        sudo -n chronyc -a 'burst 4/4' || true
+        sudo -n chronyc -a makestep || true
+        chronyc tracking || true
+      elif command -v timedatectl >/dev/null 2>&1; then
+        sudo -n timedatectl set-ntp true || true
+        sleep 1; timedatectl timesync-status || true
+      elif command -v ntpdate >/dev/null 2>&1; then
+        sudo -n ntpdate -u "${NTP_POOL:-pool.ntp.org}" || true
+      elif command -v sntp >/dev/null 2>&1; then
+        sudo -n sntp -sS "${NTP_POOL:-pool.ntp.org}" || true
+      else
+        echo "WARN: no time sync client found (chronyc/timedatectl/ntpdate/sntp)"
+      fi
+    else
+      echo "INFO: skip time sync (no sudo privileges); relying on existing system sync."
+    fi
+    echo "UTC(after):  $(date -u +%FT%T.%3NZ)"
+    echo "== Time sync end =="
+  } | tee -a "$LOG" >/dev/null
+}
+
 if [ "$CMD" = "start" ]; then
   # pre-stop in case of repeated starts on the same RUN_ID
   stop_collectors
   node_meta
+  time_sync
 
   # Host CPU/MEM samplers disabled (resources.jsonl not produced)
 
