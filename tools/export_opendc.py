@@ -489,6 +489,13 @@ def main():
         return cap
 
     tasks_df['cpu_capacity'] = tasks_df.apply(_normalize_capacity, axis=1).astype('float64')
+
+    # Cap cpu_capacity by 2400 MHz per core (e.g., 1 core -> max 2400, 2 cores -> 4800, etc.)
+    tasks_df['cpu_capacity'] = tasks_df.apply(
+        lambda row: float(min(float(row['cpu_capacity']), 2400.0 * int(row['cpu_count']))),
+        axis=1
+    ).astype('float64')
+
     tasks_df.drop(columns=['p95_mhz'], inplace=True)
 
     # Save to parquet files with explicit required schemas

@@ -164,8 +164,39 @@ def main(argv: list[str]) -> int:
     ffmpeg = which("ffmpeg") or "ffmpeg"
     cmd = launch_prefix + [ffmpeg] + argv
 
-    # Spawn
-    p = subprocess.Popen(cmd)
+    # Spawn with hard CPU affinity guard
+    preexec = None
+    if cpuset:
+        def _parse_cpuset(s: str) -> set:
+            res = set()
+            for part in s.split(','):
+                part = part.strip()
+                if not part:
+                    continue
+                if '-' in part:
+                    a, b = part.split('-', 1)
+                    try:
+                        start = int(a); end = int(b)
+                        if start <= end:
+                            res.update(range(start, end + 1))
+                    except Exception:
+                        continue
+                else:
+                    try:
+                        res.add(int(part))
+                    except Exception:
+                        continue
+            return res
+        cpu_set = _parse_cpuset(cpuset)
+        if cpu_set:
+            def _preexec():
+                try:
+                    os.sched_setaffinity(0, cpu_set)
+                except Exception:
+                    pass
+            preexec = _preexec
+
+    p = subprocess.Popen(cmd, preexec_fn=preexec)
     pid = p.pid
 
     # PID sentinel
@@ -227,6 +258,7 @@ def main(argv: list[str]) -> int:
         "input": os.path.basename(inp) if inp else None,
         "output": os.path.basename(outp) if outp else None,
         "pid": pid,
+        "cpuset": cpuset or None,
         "bytes_in": bytes_in,
         "bytes_out": bytes_out,
         "status": rc,

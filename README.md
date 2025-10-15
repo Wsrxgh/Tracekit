@@ -7,16 +7,31 @@ A comprehensive cloud application tracing and performance monitoring framework d
 - Common (all nodes):
   - OS packages: `sudo apt update && sudo apt install -y jq python3 python3-pip redis-tools`
   - Clone repo to `~/Tracekit` and prepare a shared `run_id.env` (same on all nodes)
-- Controller (cloud0):
-  - Install Redis server: `sudo apt install -y redis-server`
-  - Edit `/etc/redis/redis.conf`: set `bind 0.0.0.0` and `requirepass Wsr123`
-  - Restart and verify: `sudo systemctl restart redis-server` and `redis-cli -a 'Wsr123' -h 127.0.0.1 -p 6379 ping` → PONG
+- Controller (controller node):
+  - Install and enable Redis server: `sudo apt install -y redis-server && sudo systemctl enable --now redis-server`
+  - Harden redis.conf (ensure exactly one requirepass and bind 0.0.0.0), then restart:
+    ```bash
+    sudo cp /etc/redis/redis.conf /etc/redis/redis.conf.bak.$(date +%s)
+    sudo sed -i -e '/^\s*#\s*requirepass\b/d' -e '/^\s*requirepass\b/d' /etc/redis/redis.conf
+    echo 'requirepass Wsr123' | sudo tee -a /etc/redis/redis.conf >/dev/null
+    sudo sed -i 's/^#\?bind .*/bind 0.0.0.0/' /etc/redis/redis.conf
+    sudo systemctl restart redis-server
+    ```
+  - Verify behavior (unauth should be NOAUTH; with password should be PONG):
+    ```bash
+    redis-cli -h <controller_ip> -p 6379 ping
+    redis-cli -a 'Wsr123' -h <controller_ip> -p 6379 ping
+    ```
   - Open firewall for 6379 if needed (ufw/security group)
 - Workers (cloud1..N):
   - Install ffmpeg/ffprobe: `sudo apt install -y ffmpeg`
-  - Python packages: `python3 -m pip install -r tools/scheduler/requirements.txt`  (optional: `python3 -m pip install psutil`)
+  - Python packages: `python3 -m pip install -r tools/scheduler/requirements.txt`  (psutil is included)
   - Optional time sync client: `sudo apt install -y chrony`（或确保 systemd-timesyncd 正常）
-  - Verify connectivity: `redis-cli -a 'Wsr123' -h <controller_ip> -p 6379 ping` → PONG
+  - Verify connectivity (both unauth and auth):
+    ```bash
+    redis-cli -h <controller_ip> -p 6379 ping         # expect: (error) NOAUTH Authentication required.
+    redis-cli -a 'Wsr123' -h <controller_ip> -p 6379 ping  # expect: PONG
+    ```
   - Ensure `inputs/ffmpeg` 可访问（如无共享存储需同步到各 worker）
 
 ### 2) Test flow (summary)
@@ -35,7 +50,7 @@ A comprehensive cloud application tracing and performance monitoring framework d
   - NODE_ID：默认主机名，通常不需要手动设置
   - STAGE：示例采用 `cloud`，不强制
 - Worker（tools/scheduler/worker.py）
-  - `--outputs=outputs`, `--redis=redis://localhost:6379/0`
+  - `--outputs=outputs`, `--redis=redis://localhost:6379/0` (with password: `redis://<controller_ip>:6379/0?password=<pass>`)
   - `--parallel=0`（仅容量模式），`--allocation-ratio=1.0`，`--capacity-units=0`（默认按 ratio×逻辑核数）
   - `--cpu-binding=exclusive`（绑核；如需公平共享用 `shared`），`--cpuweight-per-vcpu=100`
   - `--reset-capacity`（默认关），`--clear-queue`（默认关）
@@ -163,7 +178,7 @@ Recipes:
   # On each worker (example values)
   python3 tools/scheduler/worker.py \
     --outputs outputs \
-    --redis "redis://:Wsr123@<controller_ip>:6379/0" \
+    --redis "redis://<controller_ip>:6379/0?password=Wsr123" \
     --parallel 4 \
     --allocation-ratio 1.0 \
     --cpu-binding exclusive
@@ -173,7 +188,7 @@ Recipes:
   # On each worker (do NOT pass --parallel)
   python3 tools/scheduler/worker.py \
     --outputs outputs \
-    --redis "redis://:Wsr123@<controller_ip>:6379/0" \
+    --redis "redis://<controller_ip>:6379/0?password=Wsr123" \
     --allocation-ratio 1.5 \
     --cpu-binding shared
   ```
@@ -210,7 +225,7 @@ sudo -E RUN_ID=$RUN_ID python3 tools/scheduler/worker.py \
   --outputs outputs \
   --allocation-ratio 1.25 \
   --cpu-binding shared \
-  --redis "redis://:Wsr123@<controller_ip>:6379/0"
+  --redis "redis://<controller_ip>:6379/0?password=Wsr123"
 # Optional for clean tests: add --reset-capacity and/or --clear-queue
 ```
 
@@ -226,7 +241,7 @@ for k in $(redis-cli -a 'Wsr123' -h <controller_ip> KEYS 'q:run.*'); do redis-cl
 # Start central with weigher=instances (prefer fewer running instances)
 mkdir -p "logs/$RUN_ID"
 nohup python3 tools/scheduler/scheduler_central.py \
-  --redis "redis://:Wsr123@<controller_ip>:6379/0" \
+  --redis "redis://<controller_ip>:6379/0?password=Wsr123" \
   --weigher instances --weigher-order min \
   > "logs/$RUN_ID/central.log" 2>&1 &
 
@@ -237,7 +252,7 @@ python3 tools/scheduler/dispatcher.py \
   --pending --pending-mode pulse --pulse-size 10 --pulse-interval 100 \
   --mix "fast1080p=2,medium480p=3,hevc1080p=2,light1c=3" \
   --total 20 --seed 20250901 \
-  --redis "redis://:Wsr123@<controller_ip>:6379/0"
+  --redis "redis://<controller_ip>:6379/0?password=Wsr123"
 ```
 
 3) Stop collectors and parse (each worker)
@@ -268,12 +283,12 @@ Examples:
 ```bash
 python3 tools/scheduler/scheduler_central.py \
   --weigher instances --weigher-order min \
-  --redis "redis://:Wsr123@<controller_ip>:6379/0"
+  --redis "redis://<controller_ip>:6379/0?password=Wsr123"
 ```
 ```bash
 python3 tools/scheduler/scheduler_central.py \
   --weigher vcpu --weigher-order min \
-  --redis "redis://:Wsr123@<controller_ip>:6379/0"
+  --redis "redis://<controller_ip>:6379/0?password=Wsr123"
 ```
 
 Notes:
@@ -323,9 +338,8 @@ Generated files:
 - vegeta (optional; for load generation if you choose to use it)
 
 - Workers: install ffmpeg/ffprobe: `sudo apt install -y ffmpeg`
-- Python packages for control plane:
-  - `python3 -m pip install -r tools/scheduler/requirements.txt`
-  - Optional: `python3 -m pip install psutil`
+- Python packages for control plane and workers:
+  - `python3 -m pip install -r tools/scheduler/requirements.txt`  # includes psutil
 - Optional (for OpenDC export on the controller): `python3 -m pip install pandas numpy pyarrow`
 
 ## License
