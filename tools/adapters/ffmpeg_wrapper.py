@@ -198,6 +198,27 @@ def main(argv: list[str]) -> int:
 
     p = subprocess.Popen(cmd, preexec_fn=preexec)
     pid = p.pid
+    # Early per-thread affinity enforcement (catch threads that widen mask)
+    try:
+        if cpuset and 'cpu_set' in locals() and cpu_set:
+            deadline = time.time() + 5.0  # guard window
+            while time.time() < deadline and p.poll() is None:
+                try:
+                    for tid_name in os.listdir(f"/proc/{pid}/task"):
+                        try:
+                            tid = int(tid_name)
+                        except Exception:
+                            continue
+                        try:
+                            os.sched_setaffinity(tid, cpu_set)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                time.sleep(0.1)
+    except Exception:
+        pass
+
 
     # PID sentinel
     try:
