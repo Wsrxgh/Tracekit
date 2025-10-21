@@ -12,12 +12,18 @@ DURATION ?= 60s
 CPU_MS ?= 5
 RESP_KB ?= 8
 CALL_URL ?=
-NODE_ID ?= vm0
-STAGE ?= edge
+NODE_ID ?= $(shell hostname)
+STAGE ?= cloud
 WORKERS ?= 1
 IFACE ?=
 IMG ?= tunable-svc:0.1.0
 VM_IP ?= 127.0.0.1
+
+
+# Default PID whitelist directory for collector (auto-created)
+PROC_PID_DIR ?= logs/$(RUN_ID)/pids
+# Default to sampling only ffmpeg/ffprobe; override as needed
+PROC_MATCH ?= ^ffmpeg$|^ffprobe$
 
 LOG_DIR := logs/$(RUN_ID)
 

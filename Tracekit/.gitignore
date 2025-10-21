@@ -65,3 +65,9 @@ inputs/ffmpeg/
 .bash_history
 .wget-hsts
 .sudo_as_admin_successful
+
+
+# Local-only scripts/tools (untracked by request)
+tools/adapters/ffmpeg_wrapper.sh
+tools/collect_sys.sh
+tools/filter_opendc_topn.py

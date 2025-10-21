@@ -22,7 +22,7 @@ cts_dir.mkdir(exist_ok=True)
 
 # Resolve identity for this parse run
 NODE_ID = os.environ.get("NODE_ID", "vm0")
-STAGE   = os.environ.get("STAGE", "edge")
+STAGE   = os.environ.get("STAGE", "cloud")
 # Hard override from node_meta.json if available (authoritative)
 try:
     _m = json.load(open(LOGS/"node_meta.json","r"))
