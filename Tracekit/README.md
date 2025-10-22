@@ -20,6 +20,39 @@ Notes
 - ffmpeg and redis-server are OS packages (see Preparation), not pip packages.
 - Use a virtual environment if preferred.
 
+## Quick setup scripts (Ubuntu/Debian with sudo)
+
+Two one-shot scripts are provided to prepare new VMs. They are conservative by default (no remote Redis exposure unless you opt in).
+
+- Controller node:
+  ```bash
+  REDIS_PASS='StrongPassword!' bash tools/setup/setup_controller.sh
+  # To expose Redis remotely (bind 0.0.0.0 and open tcp/6379 via ufw):
+  REDIS_PASS='StrongPassword!' EXPOSE_REDIS=1 bash tools/setup/setup_controller.sh
+  ```
+- Worker node:
+  ```bash
+  # Minimal deps (scheduler/worker only) using system pip:
+  bash tools/setup/setup_worker.sh
+  # Recommended: create venv and install minimal deps:
+  USE_VENV=1 bash tools/setup/setup_worker.sh
+  # Full Tracekit toolchain (incl. OpenDC export):
+  FULL_TRACEKIT=1 USE_VENV=1 bash tools/setup/setup_worker.sh
+  ```
+
+Notes
+- Scripts target Ubuntu/Debian (apt). For RHEL/CentOS, manual steps or a separate script are needed.
+- Exposing Redis on 0.0.0.0 is optional and risky on public networks—use strong passwords and firewall allowlists.
+- If ufw is unavailable, the controller script will attempt to install it; otherwise, open port 6379 manually.
+
+Coverage relative to "Preparation on a new VM"
+- These scripts replace the package installation/configuration steps in section "1) Preparation on a new VM".
+- Controller script covers: OS packages, Redis install + requirepass configuration, optional bind 0.0.0.0 and opening tcp/6379, and enabling the service.
+- Worker script covers: OS packages (ffmpeg/python), Python dependencies (minimal scheduler/worker or full Tracekit), and optional chrony.
+- You still need to: clone this repository, create and share the run_id.env, ensure inputs/ffmpeg exists, and review firewall/time sync policies appropriate to your environment.
+
+
+
 ## 1) Preparation on a new VM
 
 - Common (all nodes)
@@ -66,7 +99,7 @@ Notes
   - Ensure inputs exist locally (or shared): `inputs/ffmpeg`
 
 
-## 2) Complete test flow (copy‑paste)
+## 2) Complete test flow
 
 Use the same RUN_ID on all machines:
 ```bash
