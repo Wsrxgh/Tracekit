@@ -2,6 +2,15 @@
 
 This directory contains scripts for comparing one or many experiments and visualizing results. Core dependencies: pandas/numpy; reading Parquet requires pyarrow or fastparquet; some scripts use matplotlib for plotting.
 
+## Install dependencies
+
+From the parent folder (once):
+```bash
+python3 -m pip install -r ../requirements.txt
+```
+This installs pandas, numpy, pyarrow (Parquet), matplotlib, scipy used across analysis scripts.
+
+
 ### Scripts and inputs/parameters
 
 - compare_combined_results.py

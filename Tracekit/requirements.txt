@@ -1,0 +1,8 @@
+# Tracekit Python dependencies
+# Includes scheduler (redis/psutil) and tools (export to OpenDC requires pandas/numpy/pyarrow)
+redis>=4.6
+psutil>=5.9
+pandas>=2.0
+numpy>=1.24
+pyarrow>=10.0
+

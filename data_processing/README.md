@@ -2,6 +2,15 @@
 
 This directory groups three toolsets for preparing, validating, and analyzing experiment data. Each subfolder contains standalone CLI scripts with their own README documenting required inputs and parameters.
 
+## Install dependencies
+
+Install once for all submodules in this directory:
+```bash
+python3 -m pip install -r requirements.txt
+```
+Includes: pandas, numpy, pyarrow (Parquet), matplotlib, scipy.
+
+
 - consistency_verification
   - Purpose: post-hoc checks to compare physical (Continuum) telemetry with OpenDC simulation outputs. Includes power trend reconstruction/alignment, latency/throughput comparison, JSONL merging, and publication-ready plots.
   - See: data_processing/consistency_verification/README.md

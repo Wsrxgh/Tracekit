@@ -2,6 +2,15 @@
 
 Post-hoc consistency checks between OpenDC (simulation) and Continuum (physical) without modifying the simulator kernel. Primary deps: pandas/numpy; reading Parquet requires pyarrow or fastparquet; SciPy is used for some statistics (optional); matplotlib for plotting (optional).
 
+## Install dependencies
+
+From the parent folder (once):
+```bash
+python3 -m pip install -r ../requirements.txt
+```
+This installs pandas, numpy, pyarrow (Parquet), matplotlib, scipy.
+
+
 ### Scripts and inputs/parameters
 
 - merge_invocations_jsonl.py

@@ -1,0 +1,8 @@
+# Data processing and analysis dependencies
+# Used by analysis/, calibration/, consistency_verification/
+pandas>=2.0
+numpy>=1.24
+pyarrow>=10.0
+matplotlib>=3.7
+scipy>=1.10
+

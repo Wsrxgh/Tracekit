@@ -13,6 +13,13 @@ Small read‑only utilities to sample per‑VM energy files (energy_uj) and writ
   - `ts`: Periodically sample energy counters, derive point‑in‑time power in watts, and write CSV time series.
   - `once`: Measure total energy and average power over a fixed interval.
 
+## Installation
+
+- Python dependencies: none (stdlib only). No `pip install` step is required.
+- External requirement: Scaphandre (QEMU) to expose per-VM `energy_uj` files.
+  - See: https://github.com/hubblo-org/scaphandre
+- Ensure you have read access to the VM `energy_uj` files before running.
+
 ## Requirements
 - Python 3.7+
 - Access to the VM energy counter files (read permission)

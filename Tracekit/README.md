@@ -5,6 +5,21 @@ A compact guide to install, run, and collect traces. This README focuses on:
 2) End‑to‑end test flow (copy‑paste blocks) and full parameter reference
 3) Output artifacts
 
+## Install dependencies (Python)
+
+- Minimal (scheduler/worker only):
+  ```bash
+  python3 -m pip install -r tools/scheduler/requirements.txt
+  ```
+- Full Tracekit tools (incl. OpenDC export utilities):
+  ```bash
+  python3 -m pip install -r requirements.txt
+  ```
+
+Notes
+- ffmpeg and redis-server are OS packages (see Preparation), not pip packages.
+- Use a virtual environment if preferred.
+
 ## 1) Preparation on a new VM
 
 - Common (all nodes)
